@@ -1,0 +1,6 @@
+{
+  "name": "Tether",
+  "description": "A minimal, local-first block workspace where documents, extracted files, and editable code are connected by visible logic tethers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
