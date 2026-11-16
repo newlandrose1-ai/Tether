@@ -1,10 +1,13 @@
 'use client';
 
-import React, { memo, useMemo, useState } from 'react';
+import React, { memo, useCallback, useMemo, useState } from 'react';
 import type { Block, FileBlockData, TetherGroup } from '../../types/model';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { computeContentHash } from '../../lib/hash';
 import { formatFileSize, getFileTypeInfo } from '../../lib/fileTypes';
+import { getImageBlockPreviewSrc } from '../../lib/imageAssets';
+import { isBlockPreviewTabCollapsed } from '../../lib/tetherFolderSync';
+import { useBlockResize } from '../../lib/useBlockResize';
 import {
   FileText,
   FileCode,
@@ -27,6 +30,7 @@ import {
   Music,
   Film,
   Globe,
+  Link2,
 } from 'lucide-react';
 
 interface FileBlockProps {
@@ -36,6 +40,9 @@ interface FileBlockProps {
   isConnectingSource: boolean;
   isValidTarget: boolean;
   isInvalidTarget: boolean;
+  isTetheredChild?: boolean;
+  tetherCount?: number;
+  tetherParentTitle?: string;
   onStartTether: (e: React.MouseEvent) => void;
   onCompleteTether: (e: React.MouseEvent) => void;
 }
@@ -46,6 +53,9 @@ export const FileBlock = memo(function FileBlock({
   isConnectingSource,
   isValidTarget,
   isInvalidTarget,
+  isTetheredChild = false,
+  tetherCount = 0,
+  tetherParentTitle,
   onStartTether,
   onCompleteTether,
 }: FileBlockProps) {
@@ -57,13 +67,32 @@ export const FileBlock = memo(function FileBlock({
 
   const [isExpanded, setIsExpanded] = useState(false);
   const [showPdfEmbed, setShowPdfEmbed] = useState(false);
-  const [isResizing, setIsResizing] = useState(false);
 
-  const isCollapsed = Boolean(block.collapsed);
+  const isCollapsed = isBlockPreviewTabCollapsed(block, isTetheredChild);
   const handleToggleCollapse = (e: React.MouseEvent) => {
     e.stopPropagation();
     updateBlock(block.id, { collapsed: !isCollapsed });
   };
+
+  const handleCommitResize = useCallback(
+    (id: string, size: { width: number; height: number }) => {
+      updateBlock(id, size);
+    },
+    [updateBlock]
+  );
+
+  const { liveWidth, liveHeight, isResizing, handleResizeStart } = useBlockResize({
+    blockId: block.id,
+    width: block.width,
+    height: block.height,
+    defaultWidth: 320,
+    defaultHeight: 240,
+    minWidth: 280,
+    maxWidth: 700,
+    minHeight: 160,
+    maxHeight: 600,
+    onCommit: handleCommitResize,
+  });
 
   const data = block.data as FileBlockData;
   const isBinary = data?.binary ?? false;
@@ -85,61 +114,36 @@ export const FileBlock = memo(function FileBlock({
     [block.title, block.kind, data?.mimeType, isBinary, isPdf]
   );
 
-  const width = block.width ?? 320;
-  const height = block.height;
-
-  const currentHash = useMemo(() => computeContentHash(content), [content]);
-  const isAuditFresh = Boolean(block.lastAuditHash && block.lastAuditHash === currentHash);
+  const currentHash = useMemo(
+    () => (block.copiedFromBlockId ? computeContentHash(content) : ''),
+    [block.copiedFromBlockId, content]
+  );
+  const isAuditFresh = Boolean(
+    block.copiedFromBlockId && block.lastAuditHash && block.lastAuditHash === currentHash
+  );
   const isAuditPassed = isAuditFresh && block.lastAuditStatus === 'passed';
   const isAuditFailed = isAuditFresh && block.lastAuditStatus === 'failed';
-  const errorCount = (block.lastAuditFindings ?? []).filter((f) => f.severity === 'error').length;
+  const errorCount = block.copiedFromBlockId
+    ? (block.lastAuditFindings ?? []).filter((f) => f.severity === 'error').length
+    : 0;
 
   const formatSize = formatFileSize;
-
-  const handleResizeStart = (e: React.MouseEvent, direction: 'e' | 's' | 'se') => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsResizing(true);
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const startWidth = block.width ?? 320;
-    const startHeight = block.height ?? 240;
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      let newWidth = startWidth;
-      let newHeight = startHeight;
-
-      if (direction === 'e' || direction === 'se') {
-        newWidth = Math.max(280, Math.min(700, startWidth + (moveEvent.clientX - startX)));
-      }
-      if (direction === 's' || direction === 'se') {
-        newHeight = Math.max(160, Math.min(600, startHeight + (moveEvent.clientY - startY)));
-      }
-
-      updateBlock(block.id, { width: newWidth, height: newHeight });
-    };
-
-    const handleMouseUp = () => {
-      setIsResizing(false);
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-  };
+  const cardWidth = isCollapsed ? Math.min(liveWidth, 310) : liveWidth;
 
   return (
     <div
       style={{
-        width: `${width}px`,
-        height: isCollapsed ? 'auto' : height ? `${height}px` : undefined,
+        width: `${cardWidth}px`,
+        height: isCollapsed ? 'auto' : liveHeight ? `${liveHeight}px` : undefined,
+        contain: 'layout style',
       }}
       className={`group/box relative flex flex-col glass-card border rounded-lg overflow-hidden transition-[border-color,box-shadow] duration-150 select-none ${
         isResizing ? 'ring-1 ring-orange-500/40' : ''
       } ${
         isSelected
           ? 'border-orange-500 ring-2 ring-orange-500/25 shadow-[0_0_24px_rgba(249,115,22,0.16)]'
+          : isCollapsed && isTetheredChild
+          ? 'border-zinc-700/80 hover:border-orange-500/70'
           : 'border-zinc-700/75 hover:border-orange-500/60'
       } ${
         isConnectingSource
@@ -153,28 +157,35 @@ export const FileBlock = memo(function FileBlock({
     >
       <div
         className={`h-0.5 w-full shrink-0 transition-colors ${
-          isSelected ? 'bg-orange-500' : 'bg-zinc-600/80 group-hover/box:bg-orange-500/80'
+          isSelected
+            ? 'bg-orange-500'
+            : isTetheredChild
+            ? 'bg-orange-500/45 group-hover/box:bg-orange-500/85'
+            : 'bg-zinc-600/80 group-hover/box:bg-orange-500/80'
         }`}
       />
 
-      {/* Header Bar */}
+      {/* Header / Preview Tab Bar */}
       <div
         onDoubleClick={(e) => {
           e.stopPropagation();
           openBlockInEditor(block.id);
         }}
-        className="h-9 px-2.5 bg-gradient-to-b from-zinc-800/45 to-zinc-900/60 border-b border-zinc-700/70 flex items-center justify-between shrink-0 cursor-default gap-1.5"
+        className={`px-2.5 bg-gradient-to-b from-zinc-800/45 to-zinc-900/60 flex items-center justify-between shrink-0 cursor-default gap-1.5 ${
+          isCollapsed ? 'min-h-[40px] py-1' : 'h-9 border-b border-zinc-700/70'
+        }`}
       >
         <div className="flex items-center gap-1.5 min-w-0">
           <button
             type="button"
             onClick={handleToggleCollapse}
-            className="text-zinc-400 hover:text-orange-400 p-1 rounded transition-colors cursor-pointer"
-            title={isCollapsed ? 'Expand file' : 'Collapse file'}
-            aria-label={isCollapsed ? 'Expand file' : 'Collapse file'}
+            className="text-zinc-400 hover:text-orange-400 p-1 rounded transition-colors cursor-pointer shrink-0"
+            title={isCollapsed ? 'Expand preview tab' : 'Collapse to preview tab'}
+            aria-label={isCollapsed ? 'Expand preview tab' : 'Collapse to preview tab'}
+            aria-expanded={!isCollapsed}
           >
             {isCollapsed ? (
-              <ChevronRight className="w-3.5 h-3.5 text-zinc-400" />
+              <ChevronRight className="w-3.5 h-3.5 text-orange-400/90" />
             ) : (
               <ChevronDown className="w-3.5 h-3.5 text-orange-400" />
             )}
@@ -194,12 +205,22 @@ export const FileBlock = memo(function FileBlock({
           ) : (
             <FileCode className={`w-3.5 h-3.5 ${fileInfo.accentColorClass} shrink-0`} />
           )}
-          <span
-            className="font-mono text-xs font-semibold text-zinc-100 truncate tracking-tight"
-            title={block.title}
-          >
-            {block.title}
-          </span>
+          <div className="min-w-0 flex flex-col">
+            <span
+              className="font-mono text-xs font-semibold text-zinc-100 truncate tracking-tight leading-tight"
+              title={block.title}
+            >
+              {block.title}
+            </span>
+            {isCollapsed && (tetherParentTitle || tetherCount > 0) && (
+              <span className="text-[9px] font-mono text-zinc-400 truncate flex items-center gap-1 leading-tight">
+                <Link2 className="w-2.5 h-2.5 text-orange-400/80 shrink-0" />
+                <span className="truncate">
+                  {tetherParentTitle ? `in ${tetherParentTitle}` : `${tetherCount} tether${tetherCount === 1 ? '' : 's'}`}
+                </span>
+              </span>
+            )}
+          </div>
           <span
             className={`text-[9px] font-mono font-semibold px-1.5 py-0.5 rounded border shrink-0 ${fileInfo.badgeClass}`}
             title={fileInfo.label}
@@ -231,7 +252,7 @@ export const FileBlock = memo(function FileBlock({
             <span>{fileInfo.isTextEditable ? 'Edit' : 'View'}</span>
           </button>
 
-          {fileInfo.isTextEditable && (
+          {!isCollapsed && fileInfo.isTextEditable && (
             <button
               type="button"
               onClick={(e) => {
@@ -254,7 +275,7 @@ export const FileBlock = memo(function FileBlock({
               title="Start tether from this file"
             >
               <ArrowRight className="w-2.5 h-2.5" />
-              <span>Tether</span>
+              {!isCollapsed && <span>Tether</span>}
             </button>
           )}
 
@@ -282,7 +303,7 @@ export const FileBlock = memo(function FileBlock({
       {/* Copied-block Audit & Snip Row */}
       {block.copiedFromBlockId && (
         <div
-          className={`px-2.5 py-1.5 border-b border-zinc-700/70 flex items-center justify-between gap-2 text-[10px] font-mono ${
+          className={`px-2.5 py-1.5 border-t border-zinc-700/70 flex items-center justify-between gap-2 text-[10px] font-mono ${
             isAuditPassed
               ? 'bg-emerald-950/35 text-emerald-300'
               : isAuditFailed
@@ -342,7 +363,7 @@ export const FileBlock = memo(function FileBlock({
         <>
           <div className="flex-1 p-2.5 bg-[#090B0E]/85 overflow-y-auto space-y-2 select-text font-mono text-xs">
             <div className="text-[10px] font-mono text-zinc-400 truncate bg-zinc-900/70 border border-zinc-800 px-2 py-1 rounded flex items-center justify-between">
-              <span className="truncate">{data?.path || block.title}</span>
+              <span className="truncate">{block.sourcePath || data?.path || block.title}</span>
               <span className="shrink-0 text-zinc-400 ml-2 tabular-nums">
                 {formatSize(data?.size ?? 0)}
               </span>
@@ -392,7 +413,7 @@ export const FileBlock = memo(function FileBlock({
                   </div>
                 )}
               </div>
-            ) : fileInfo.viewerKind === 'image' ? (
+            ) : fileInfo.viewerKind === 'image' || fileInfo.viewerKind === 'svg' ? (
               <div
                 onClick={(e) => {
                   e.stopPropagation();
@@ -402,19 +423,24 @@ export const FileBlock = memo(function FileBlock({
                 className="p-2 bg-zinc-900/60 border border-zinc-800 hover:border-orange-500/50 rounded space-y-2 cursor-pointer transition-colors"
                 title="Click to open full image viewer"
               >
-                {data?.dataUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={data.dataUrl}
-                    alt={block.title}
-                    className="w-full max-h-36 object-contain rounded bg-zinc-950/70"
-                  />
-                ) : (
-                  <div className="py-4 text-center space-y-1">
-                    <ImageIcon className="w-5 h-5 text-emerald-400 mx-auto" />
-                    <div className="text-[11px] text-zinc-300">{fileInfo.label}</div>
-                  </div>
-                )}
+                {(() => {
+                  const previewSrc = getImageBlockPreviewSrc(block);
+                  return previewSrc ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={previewSrc}
+                      alt={block.title}
+                      loading="lazy"
+                      decoding="async"
+                      className="w-full max-h-36 object-contain rounded bg-zinc-950/70"
+                    />
+                  ) : (
+                    <div className="py-4 text-center space-y-1">
+                      <ImageIcon className="w-5 h-5 text-emerald-400 mx-auto" />
+                      <div className="text-[11px] text-zinc-300">{fileInfo.label}</div>
+                    </div>
+                  );
+                })()}
               </div>
             ) : fileInfo.viewerKind === 'audio' || fileInfo.viewerKind === 'video' ? (
               <div
@@ -488,9 +514,9 @@ export const FileBlock = memo(function FileBlock({
             )}
           </div>
 
-          <div className="flex items-center justify-between h-[26px] px-3 bg-zinc-950/60 border-t border-zinc-800/90 text-[10px] text-zinc-500 font-mono shrink-0">
+          <div className="flex items-center justify-between h-[26px] px-3 bg-zinc-950/60 border-t border-zinc-800/90 text-[10px] text-zinc-400 font-mono shrink-0">
             <span className="truncate">{data?.parentFolderPath || fileInfo.label}</span>
-            <span className="tabular-nums shrink-0 text-zinc-400">{formatSize(data?.size ?? 0)}</span>
+            <span className="tabular-nums shrink-0 text-zinc-300">{formatSize(data?.size ?? 0)}</span>
           </div>
 
           <div

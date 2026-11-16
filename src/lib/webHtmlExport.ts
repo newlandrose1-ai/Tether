@@ -1,5 +1,5 @@
-import JSZip from 'jszip';
 import type { Project, Block, CodeBlockData, FileBlockData, TextBlockData, Tether } from '../types/model';
+import { buildProjectZip, slugifyProjectName } from './projectZipExport';
 
 export interface WebExportFileItem {
   id: string;
@@ -25,16 +25,23 @@ export function extractProjectExportFiles(project: Project, blocks: Block[]): We
       const data = b.data as CodeBlockData;
       content = data?.currentContent || '';
       language = data?.language || 'typescript';
-      path = data?.path || b.title;
+      path = b.sourcePath || data?.path || b.title;
     } else if (b.kind === 'text') {
       const data = b.data as TextBlockData;
       content = data?.content || '';
       language = 'markdown';
-      path = b.title.endsWith('.md') || b.title.endsWith('.txt') ? b.title : `${b.title}.md`;
+      const baseTitle = b.sourcePath || b.title;
+      const leaf = baseTitle.split('/').pop() || baseTitle;
+      const lower = leaf.toLowerCase();
+      const hasExt = leaf.includes('.') && !leaf.startsWith('.');
+      const isSpecial =
+        leaf.startsWith('.') ||
+        ['license', 'readme', 'makefile', 'dockerfile', 'procfile'].includes(lower);
+      path = b.sourcePath || hasExt || isSpecial ? baseTitle : `${baseTitle}.md`;
     } else if (b.kind === 'file') {
       const data = b.data as FileBlockData;
       content = data?.content || '';
-      path = data?.path || b.title;
+      path = b.sourcePath || data?.path || b.title;
       const ext = path.split('.').pop()?.toLowerCase();
       if (ext === 'json') language = 'json';
       else if (ext === 'ts' || ext === 'tsx') language = 'typescript';
@@ -603,26 +610,28 @@ export function exportProjectToSingleHtml(project: Project, blocks: Block[]): vo
 
 /**
  * Downloads a complete Web Folder as a ZIP archive containing:
- * 1) index.html (the interactive web application viewer)
- * 2) All raw source files preserved in their folder hierarchy
+ * 1) All raw source & binary files preserved in their single-source-of-truth folder hierarchy
+ * 2) index.html (or tether-explorer.html if project already has index.html) interactive web code explorer
  */
 export async function exportProjectToWebZip(project: Project, blocks: Block[]): Promise<void> {
   const files = extractProjectExportFiles(project, blocks);
   const html = generateStandaloneWebHtml(project, files);
 
-  const zip = new JSZip();
-  // Add root index.html web viewer
-  zip.file('index.html', html);
+  const { zip, manifest } = buildProjectZip(project, blocks, {
+    includeUntethered: true,
+  });
 
-  // Add all files into their actual nested folder structure inside a project folder
-  const cleanName = project.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project';
-  const projectFolder = zip.folder(cleanName) || zip;
+  const hasProjectIndexHtml = manifest.files.some(
+    (f) => f.path.toLowerCase() === 'index.html'
+  );
+  zip.file(hasProjectIndexHtml ? 'tether-explorer.html' : 'index.html', html);
 
-  for (const f of files) {
-    projectFolder.file(f.path, f.content);
-  }
-
-  const blob = await zip.generateAsync({ type: 'blob' });
+  const cleanName = slugifyProjectName(project.name);
+  const blob = await zip.generateAsync({
+    type: 'blob',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 },
+  });
   const url = URL.createObjectURL(blob);
 
   const a = document.createElement('a');
@@ -631,5 +640,5 @@ export async function exportProjectToWebZip(project: Project, blocks: Block[]): 
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

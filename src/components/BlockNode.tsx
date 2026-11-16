@@ -22,13 +22,27 @@ export interface BlockNodeData {
   isConnectingSource: boolean;
   isValidTarget: boolean;
   isInvalidTarget: boolean;
+  isTetheredChild?: boolean;
+  tetherCount?: number;
+  tetherParentTitle?: string;
+  extractedFolderPaths?: string[];
 }
 
 export const BlockNode = memo(function BlockNode({
   data,
   selected,
 }: NodeProps<BlockNodeData>) {
-  const { block, group, isConnectingSource, isValidTarget, isInvalidTarget } = data;
+  const {
+    block,
+    group,
+    isConnectingSource,
+    isValidTarget,
+    isInvalidTarget,
+    isTetheredChild = false,
+    tetherCount = 0,
+    tetherParentTitle,
+    extractedFolderPaths,
+  } = data;
 
   const connectingSourceBlockId = useWorkspaceStore((s) => s.connectingSourceBlockId);
   const setConnectingSourceBlockId = useWorkspaceStore((s) => s.setConnectingSourceBlockId);
@@ -96,6 +110,9 @@ export const BlockNode = memo(function BlockNode({
           isConnectingSource={isConnectingSource}
           isValidTarget={isValidTarget}
           isInvalidTarget={isInvalidTarget}
+          isTetheredChild={isTetheredChild}
+          tetherCount={tetherCount}
+          tetherParentTitle={tetherParentTitle}
           onStartTether={handleStartTether}
           onCompleteTether={handleCompleteTether}
         />
@@ -109,6 +126,10 @@ export const BlockNode = memo(function BlockNode({
           isConnectingSource={isConnectingSource}
           isValidTarget={isValidTarget}
           isInvalidTarget={isInvalidTarget}
+          isTetheredChild={isTetheredChild}
+          tetherCount={tetherCount}
+          tetherParentTitle={tetherParentTitle}
+          extractedFolderPaths={extractedFolderPaths}
           onStartTether={handleStartTether}
           onCompleteTether={handleCompleteTether}
         />
@@ -122,6 +143,9 @@ export const BlockNode = memo(function BlockNode({
           isConnectingSource={isConnectingSource}
           isValidTarget={isValidTarget}
           isInvalidTarget={isInvalidTarget}
+          isTetheredChild={isTetheredChild}
+          tetherCount={tetherCount}
+          tetherParentTitle={tetherParentTitle}
           onStartTether={handleStartTether}
           onCompleteTether={handleCompleteTether}
         />
@@ -135,6 +159,9 @@ export const BlockNode = memo(function BlockNode({
           isConnectingSource={isConnectingSource}
           isValidTarget={isValidTarget}
           isInvalidTarget={isInvalidTarget}
+          isTetheredChild={isTetheredChild}
+          tetherCount={tetherCount}
+          tetherParentTitle={tetherParentTitle}
           onStartTether={handleStartTether}
           onCompleteTether={handleCompleteTether}
         />

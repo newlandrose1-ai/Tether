@@ -18,6 +18,7 @@ import {
   ChevronDown,
   ChevronRight,
   PanelLeftClose,
+  ImagePlus,
 } from 'lucide-react';
 
 export function ProjectSidebar() {
@@ -47,6 +48,8 @@ export function ProjectSidebar() {
   const updateBlock = useWorkspaceStore((s) => s.updateBlock);
   const deleteBlock = useWorkspaceStore((s) => s.deleteBlock);
   const toggleSidebar = useWorkspaceStore((s) => s.toggleSidebar);
+  const openAuditModal = useWorkspaceStore((s) => s.openAuditModal);
+  const openImageModal = useWorkspaceStore((s) => s.openImageModal);
 
   // Project & Group editing states
   const [isCreatingProject, setIsCreatingProject] = useState(false);
@@ -75,14 +78,21 @@ export function ProjectSidebar() {
   const [isProjectsExpanded, setIsProjectsExpanded] = useState(true);
   const [isGroupsExpanded, setIsGroupsExpanded] = useState(true);
   const [isHierarchyExpanded, setIsHierarchyExpanded] = useState(true);
+  const [isUntetheredExpanded, setIsUntetheredExpanded] = useState(true);
 
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeProjectGroups = groups.filter((g) => g.projectId === activeProjectId);
 
-  // Build hierarchical tree for active project (showing active group blocks or all project blocks)
-  const { treeData, allFolderPaths, matchCount } = useMemo(() => {
+  // Build hierarchical tree for active project strictly from synced (tethered) blocks,
+  // and keep untethered blocks in a separate collapsible list.
+  const { treeData, allFolderPaths, matchCount, untetheredNodes } = useMemo(() => {
     if (!activeProjectId) {
-      return { treeData: [], allFolderPaths: new Set<string>(), matchCount: 0 };
+      return {
+        treeData: [],
+        allFolderPaths: new Set<string>(),
+        matchCount: 0,
+        untetheredNodes: [] as TreeNodeItem[],
+      };
     }
 
     const scopedBlocks = blocks.filter(
@@ -90,6 +100,8 @@ export function ProjectSidebar() {
         b.projectId === activeProjectId &&
         (!activeGroupId || b.groupId === activeGroupId)
     );
+    const syncedBlocks = scopedBlocks.filter((b) => Boolean(b.isInFolderStructure));
+    const untetheredBlocks = scopedBlocks.filter((b) => !b.isInFolderStructure);
     const query = filterQuery.trim().toLowerCase();
 
     const rootItems: TreeNodeItem[] = [];
@@ -122,7 +134,7 @@ export function ProjectSidebar() {
       return folderItem;
     };
 
-    scopedBlocks.forEach((b) => {
+    syncedBlocks.forEach((b) => {
       let rawPath =
         b.sourcePath ||
         (b.data as CodeBlockData | FileBlockData)?.path ||
@@ -194,10 +206,37 @@ export function ProjectSidebar() {
 
     sortTree(rootItems);
 
+    const untetheredList: TreeNodeItem[] = [];
+    untetheredBlocks.forEach((b) => {
+      const rawPath = (
+        b.sourcePath ||
+        (b.data as CodeBlockData | FileBlockData)?.path ||
+        b.title
+      ).replace(/^\/+/, '');
+      const isMatch =
+        !query ||
+        b.title.toLowerCase().includes(query) ||
+        rawPath.toLowerCase().includes(query);
+      if (isMatch) {
+        if (query) matches++;
+        untetheredList.push({
+          id: b.id,
+          name: b.title,
+          isFolder: false,
+          path: rawPath,
+          block: b,
+        });
+      }
+    });
+    untetheredList.sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+    );
+
     return {
       treeData: rootItems,
       allFolderPaths: folderPaths,
-      matchCount: query ? matches : scopedBlocks.length,
+      matchCount: query ? matches : syncedBlocks.length,
+      untetheredNodes: untetheredList,
     };
   }, [blocks, activeProjectId, activeGroupId, filterQuery]);
 
@@ -412,10 +451,14 @@ export function ProjectSidebar() {
                 <input
                   type="text"
                   autoFocus
+                  aria-label="New project name"
                   placeholder="Project name..."
                   value={newProjectName}
                   onChange={(e) => setNewProjectName(e.target.value)}
-                  className="w-full bg-transparent text-base sm:text-xs text-zinc-200 outline-none placeholder:text-zinc-600 font-mono"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') setIsCreatingProject(false);
+                  }}
+                  className="w-full bg-transparent text-base sm:text-xs text-zinc-200 outline-none placeholder:text-zinc-500 font-mono"
                 />
                 <button
                   type="submit"
@@ -452,6 +495,7 @@ export function ProjectSidebar() {
                     <input
                       type="text"
                       autoFocus
+                      aria-label="Rename project"
                       value={editProjectName}
                       onChange={(e) => setEditProjectName(e.target.value)}
                       onKeyDown={(e) => {
@@ -464,6 +508,7 @@ export function ProjectSidebar() {
                       type="button"
                       onClick={() => handleSaveRenameProject(proj.id)}
                       className="text-emerald-400 p-0.5 cursor-pointer"
+                      aria-label="Save project name"
                     >
                       <Check className="w-3.5 h-3.5" />
                     </button>
@@ -471,6 +516,7 @@ export function ProjectSidebar() {
                       type="button"
                       onClick={() => setEditingProjectId(null)}
                       className="text-zinc-400 p-0.5 cursor-pointer"
+                      aria-label="Cancel rename"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -513,38 +559,40 @@ export function ProjectSidebar() {
               return (
                 <div
                   key={proj.id}
-                  onClick={() => setActiveProject(proj.id)}
-                  className={`group flex items-center justify-between px-2 py-1 rounded text-xs cursor-pointer transition border ${
+                  className={`group flex items-center justify-between px-2 py-1 rounded text-xs transition border ${
                     isActive
                       ? 'bg-orange-500/12 border-orange-500/45 text-zinc-100 font-medium'
                       : 'border-transparent text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200'
                   }`}
                 >
-                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <button
+                    type="button"
+                    onClick={() => setActiveProject(proj.id)}
+                    aria-current={isActive ? 'true' : undefined}
+                    className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
+                  >
                     <Folder className={`w-3.5 h-3.5 flex-shrink-0 ${isActive ? 'text-orange-400' : 'text-zinc-400'}`} />
                     <span className="truncate">{proj.name}</span>
-                  </div>
-                  <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition">
+                  </button>
+                  <div className="flex items-center gap-0.5 opacity-70 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 focus-within:opacity-100 transition shrink-0">
                     <button
                       type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
+                      onClick={() => {
                         setEditingProjectId(proj.id);
                         setEditProjectName(proj.name);
                       }}
                       className="p-1 hover:text-zinc-200 rounded cursor-pointer"
-                      aria-label="Rename project"
+                      aria-label={`Rename project ${proj.name}`}
                     >
                       <Edit2 className="w-3 h-3" />
                     </button>
                     <button
                       type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
+                      onClick={() => {
                         setConfirmDeleteProjectId(proj.id);
                       }}
                       className="p-1 hover:text-red-400 rounded cursor-pointer"
-                      aria-label="Delete project"
+                      aria-label={`Delete project ${proj.name}`}
                     >
                       <Trash2 className="w-3 h-3" />
                     </button>
@@ -595,10 +643,14 @@ export function ProjectSidebar() {
                   <input
                     type="text"
                     autoFocus
+                    aria-label="New group name"
                     placeholder="Group name..."
                     value={newGroupName}
                     onChange={(e) => setNewGroupName(e.target.value)}
-                    className="w-full bg-transparent text-base sm:text-xs text-zinc-200 outline-none placeholder:text-zinc-600 font-mono"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') setIsCreatingGroup(false);
+                    }}
+                    className="w-full bg-transparent text-base sm:text-xs text-zinc-200 outline-none placeholder:text-zinc-500 font-mono"
                   />
                   <button
                     type="submit"
@@ -638,6 +690,7 @@ export function ProjectSidebar() {
                       <input
                         type="text"
                         autoFocus
+                        aria-label="Rename group"
                         value={editGroupName}
                         onChange={(e) => setEditGroupName(e.target.value)}
                         onKeyDown={(e) => {
@@ -650,6 +703,7 @@ export function ProjectSidebar() {
                         type="button"
                         onClick={() => handleSaveRenameGroup(grp.id)}
                         className="text-emerald-400 p-0.5 cursor-pointer"
+                        aria-label="Save group name"
                       >
                         <Check className="w-3.5 h-3.5" />
                       </button>
@@ -657,6 +711,7 @@ export function ProjectSidebar() {
                         type="button"
                         onClick={() => setEditingGroupId(null)}
                         className="text-zinc-400 p-0.5 cursor-pointer"
+                        aria-label="Cancel rename"
                       >
                         <X className="w-3.5 h-3.5" />
                       </button>
@@ -699,44 +754,46 @@ export function ProjectSidebar() {
                 return (
                   <div
                     key={grp.id}
-                    onClick={() => setActiveGroup(grp.id)}
-                    className={`group flex items-center justify-between px-2 py-1 rounded text-xs cursor-pointer transition border ${
+                    className={`group flex items-center justify-between px-2 py-1 rounded text-xs transition border ${
                       isActive
                         ? 'bg-orange-500/12 border-orange-500/45 text-zinc-100 font-medium'
                         : 'border-transparent text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200'
                     }`}
                   >
-                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <button
+                      type="button"
+                      onClick={() => setActiveGroup(grp.id)}
+                      aria-current={isActive ? 'true' : undefined}
+                      className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
+                    >
                       <span
                         className="w-2 h-2 rounded-full flex-shrink-0"
                         style={{ backgroundColor: grp.color }}
                       />
                       <span className="truncate">{grp.name}</span>
-                      <span className="text-[10px] font-mono text-zinc-500 tabular-nums">
+                      <span className="text-[10px] font-mono text-zinc-400 tabular-nums">
                         {count}
                       </span>
-                    </div>
-                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition">
+                    </button>
+                    <div className="flex items-center gap-0.5 opacity-70 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 focus-within:opacity-100 transition shrink-0">
                       <button
                         type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
+                        onClick={() => {
                           setEditingGroupId(grp.id);
                           setEditGroupName(grp.name);
                         }}
                         className="p-1 hover:text-zinc-200 rounded cursor-pointer"
-                        aria-label="Rename group"
+                        aria-label={`Rename group ${grp.name}`}
                       >
                         <Edit2 className="w-3 h-3" />
                       </button>
                       <button
                         type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
+                        onClick={() => {
                           setConfirmDeleteGroupId(grp.id);
                         }}
                         className="p-1 hover:text-red-400 rounded cursor-pointer"
-                        aria-label="Delete group"
+                        aria-label={`Delete group ${grp.name}`}
                       >
                         <Trash2 className="w-3 h-3" />
                       </button>
@@ -767,6 +824,15 @@ export function ProjectSidebar() {
           <span className="text-[10px] text-zinc-500 tabular-nums">({matchCount})</span>
         </button>
         <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => openImageModal()}
+            className="w-7 h-7 flex items-center justify-center text-zinc-400 hover:text-orange-300 hover:bg-orange-500/15 rounded transition cursor-pointer"
+            title="Add & attach project images"
+            aria-label="Add project images"
+          >
+            <ImagePlus className="w-3.5 h-3.5" />
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -800,9 +866,10 @@ export function ProjectSidebar() {
       {isHierarchyExpanded && (
         <div className="px-2.5 py-1.5 border-b border-zinc-700/65 flex-shrink-0">
           <div className="relative flex items-center">
-            <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-2 pointer-events-none" />
+            <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-2 pointer-events-none" />
             <input
               type="text"
+              aria-label="Filter hierarchy"
               placeholder="Filter hierarchy..."
               value={filterQuery}
               onChange={(e) => setFilterQuery(e.target.value)}
@@ -833,9 +900,10 @@ export function ProjectSidebar() {
         <form onSubmit={handleCreateFile} className="p-2 bg-zinc-900/70 border-b border-zinc-700/80 space-y-1.5 flex-shrink-0">
           <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400">
             <span>New Path</span>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1" role="group" aria-label="New block type">
               <button
                 type="button"
+                aria-pressed={newFileKind === 'code'}
                 onClick={() => setNewFileKind('code')}
                 className={`px-1.5 py-0.5 rounded text-[10px] cursor-pointer ${
                   newFileKind === 'code' ? 'bg-orange-500/20 text-orange-200 border border-orange-500/40' : 'text-zinc-400'
@@ -845,6 +913,7 @@ export function ProjectSidebar() {
               </button>
               <button
                 type="button"
+                aria-pressed={newFileKind === 'text'}
                 onClick={() => setNewFileKind('text')}
                 className={`px-1.5 py-0.5 rounded text-[10px] cursor-pointer ${
                   newFileKind === 'text' ? 'bg-orange-500/20 text-orange-200 border border-orange-500/40' : 'text-zinc-400'
@@ -858,10 +927,14 @@ export function ProjectSidebar() {
             <input
               type="text"
               autoFocus
+              aria-label="New file or folder path"
               placeholder="e.g. src/utils.ts"
               value={newFilePath}
               onChange={(e) => setNewFilePath(e.target.value)}
-              className="w-full bg-transparent text-base sm:text-xs text-zinc-100 outline-none placeholder:text-zinc-600 font-mono"
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setIsCreatingFile(false);
+              }}
+              className="w-full bg-transparent text-base sm:text-xs text-zinc-100 outline-none placeholder:text-zinc-500 font-mono"
             />
             <button type="submit" className="text-emerald-400 p-1 cursor-pointer" aria-label="Create">
               <Check className="w-3.5 h-3.5" />
@@ -881,34 +954,98 @@ export function ProjectSidebar() {
       {/* Hierarchy Tree */}
       {isHierarchyExpanded ? (
         <div role="tree" aria-label="Group hierarchy" className="flex-1 overflow-y-auto px-1 py-1.5 pb-20 md:pb-4 space-y-0.5">
-          {treeData.length === 0 ? (
+          {treeData.length === 0 && untetheredNodes.length === 0 ? (
             <div className="p-4 text-center text-xs text-zinc-500 font-mono">
               {filterQuery ? 'No matching blocks.' : 'No blocks in this group.'}
             </div>
           ) : (
-            treeData.map((node) => (
-              <FileTreeNode
-                key={node.id}
-                item={node}
-                level={0}
-                activeId={selectedBlockId}
-                filterQuery={filterQuery}
-                expandedFolders={expandedFolders}
-                onToggleFolder={handleToggleFolder}
-                onSelect={handleSelectTreeBlock}
-                onEdit={(id) => openBlockInEditor(id)}
-                onRename={(block) => {
-                  setRenamingBlock(block);
-                  setRenameValue(block.title);
-                }}
-                onDuplicate={(block) => copyBlockForEdit(block.id)}
-                onDelete={(block) => setDeletingBlock(block)}
-                onCreateFileInFolder={(folderPath) => {
-                  setNewFilePath(`${folderPath}/`);
-                  setIsCreatingFile(true);
-                }}
-              />
-            ))
+            <>
+              {treeData.length === 0 ? (
+                <div className="px-2.5 py-2 text-[11px] text-zinc-500 font-mono">
+                  {filterQuery
+                    ? 'No matching tethered blocks.'
+                    : 'Tether blocks on the canvas to sync them into the folder tree.'}
+                </div>
+              ) : (
+                treeData.map((node) => (
+                  <FileTreeNode
+                    key={node.id}
+                    item={node}
+                    level={0}
+                    activeId={selectedBlockId}
+                    filterQuery={filterQuery}
+                    expandedFolders={expandedFolders}
+                    onToggleFolder={handleToggleFolder}
+                    onSelect={handleSelectTreeBlock}
+                    onEdit={(id) => openBlockInEditor(id)}
+                    onRename={(block) => {
+                      setRenamingBlock(block);
+                      setRenameValue(block.title);
+                    }}
+                    onDuplicate={(block) => copyBlockForEdit(block.id)}
+                    onDelete={(block) => setDeletingBlock(block)}
+                    onCreateFileInFolder={(folderPath) => {
+                      setNewFilePath(`${folderPath}/`);
+                      setIsCreatingFile(true);
+                    }}
+                    onAuditFolder={(folderPath) =>
+                      openAuditModal({ targetType: 'folder', folderPath })
+                    }
+                    onAuditFile={(blockId) =>
+                      openAuditModal({ targetType: 'file', blockId })
+                    }
+                  />
+                ))
+              )}
+
+              {untetheredNodes.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-zinc-800/70">
+                  <button
+                    type="button"
+                    onClick={() => setIsUntetheredExpanded((prev) => !prev)}
+                    className="w-full px-2 py-1 flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                    aria-expanded={isUntetheredExpanded}
+                  >
+                    <span className="flex items-center gap-1">
+                      {isUntetheredExpanded ? (
+                        <ChevronDown className="w-3 h-3 text-zinc-500" />
+                      ) : (
+                        <ChevronRight className="w-3 h-3 text-zinc-500" />
+                      )}
+                      <span>Untethered</span>
+                    </span>
+                    <span className="text-zinc-500 tabular-nums">{untetheredNodes.length}</span>
+                  </button>
+
+                  {isUntetheredExpanded && (
+                    <div className="mt-0.5 space-y-0.5">
+                      {untetheredNodes.map((node) => (
+                        <FileTreeNode
+                          key={node.id}
+                          item={node}
+                          level={0}
+                          activeId={selectedBlockId}
+                          filterQuery={filterQuery}
+                          expandedFolders={expandedFolders}
+                          onToggleFolder={handleToggleFolder}
+                          onSelect={handleSelectTreeBlock}
+                          onEdit={(id) => openBlockInEditor(id)}
+                          onRename={(block) => {
+                            setRenamingBlock(block);
+                            setRenameValue(block.title);
+                          }}
+                          onDuplicate={(block) => copyBlockForEdit(block.id)}
+                          onDelete={(block) => setDeletingBlock(block)}
+                          onAuditFile={(blockId) =>
+                            openAuditModal({ targetType: 'file', blockId })
+                          }
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </div>
       ) : (
@@ -925,6 +1062,7 @@ export function ProjectSidebar() {
             <input
               type="text"
               autoFocus
+              aria-label={`Rename ${renamingBlock.title}`}
               value={renameValue}
               onChange={(e) => setRenameValue(e.target.value)}
               onKeyDown={(e) => {
@@ -933,10 +1071,20 @@ export function ProjectSidebar() {
               }}
               className="w-full bg-transparent text-base sm:text-xs text-zinc-100 outline-none font-mono"
             />
-            <button type="button" onClick={handleSaveRename} className="text-emerald-400 p-1 cursor-pointer">
+            <button
+              type="button"
+              onClick={handleSaveRename}
+              className="text-emerald-400 p-1 cursor-pointer"
+              aria-label="Confirm rename"
+            >
               <Check className="w-3.5 h-3.5" />
             </button>
-            <button type="button" onClick={() => setRenamingBlock(null)} className="text-zinc-400 p-1 cursor-pointer">
+            <button
+              type="button"
+              onClick={() => setRenamingBlock(null)}
+              className="text-zinc-400 p-1 cursor-pointer"
+              aria-label="Cancel rename"
+            >
               <X className="w-3.5 h-3.5" />
             </button>
           </div>

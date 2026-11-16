@@ -96,7 +96,7 @@ export function EditorTabs({
       role="tablist"
       aria-label="Open editor files"
     >
-      {openBlockIds.map((id) => {
+      {openBlockIds.map((id, idx) => {
         const block = blocks.find((b) => b.id === id);
         if (!block) return null;
 
@@ -112,8 +112,21 @@ export function EditorTabs({
             tabIndex={0}
             onClick={() => onSelectTab(id)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') onSelectTab(id);
-              if (e.key === 'w' && (e.metaKey || e.ctrlKey)) onCloseTab(id);
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onSelectTab(id);
+              } else if (e.key === 'ArrowRight' && openBlockIds.length > 1) {
+                e.preventDefault();
+                const nextId = openBlockIds[(idx + 1) % openBlockIds.length];
+                onSelectTab(nextId);
+              } else if (e.key === 'ArrowLeft' && openBlockIds.length > 1) {
+                e.preventDefault();
+                const prevId = openBlockIds[(idx - 1 + openBlockIds.length) % openBlockIds.length];
+                onSelectTab(prevId);
+              } else if (e.key.toLowerCase() === 'w' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                onCloseTab(id);
+              }
             }}
             className={`group relative flex items-center gap-1.5 h-full px-3 text-xs border-r border-zinc-700/65 cursor-pointer transition-colors min-w-[110px] max-w-[220px] outline-none flex-shrink-0 ${
               isActive

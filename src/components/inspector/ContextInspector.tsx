@@ -85,9 +85,30 @@ export function ContextInspector() {
       </div>
 
       {/* Tab Controls */}
-      <div className="flex items-center border-b border-zinc-700/75 bg-zinc-950/35 px-2 gap-1 text-xs font-mono">
+      <div
+        role="tablist"
+        aria-label="Inspector sections"
+        onKeyDown={(e) => {
+          const order: Array<'structure' | 'details' | 'changes'> = [
+            'structure',
+            'details',
+            'changes',
+          ];
+          const idx = order.indexOf(activeTab);
+          if (e.key === 'ArrowRight') {
+            e.preventDefault();
+            setActiveTab(order[(idx + 1) % order.length]);
+          } else if (e.key === 'ArrowLeft') {
+            e.preventDefault();
+            setActiveTab(order[(idx - 1 + order.length) % order.length]);
+          }
+        }}
+        className="flex items-center border-b border-zinc-700/75 bg-zinc-950/35 px-2 gap-1 text-xs font-mono"
+      >
         <button
           type="button"
+          role="tab"
+          aria-selected={activeTab === 'structure'}
           onClick={() => setActiveTab('structure')}
           className={`flex items-center justify-center gap-1.5 px-3 py-2 sm:py-1.5 min-h-[44px] sm:min-h-0 border-b-2 text-xs font-medium flex-1 transition cursor-pointer ${
             activeTab === 'structure'
@@ -101,6 +122,8 @@ export function ContextInspector() {
 
         <button
           type="button"
+          role="tab"
+          aria-selected={activeTab === 'details'}
           onClick={() => setActiveTab('details')}
           className={`flex items-center justify-center gap-1.5 px-3 py-2 sm:py-1.5 min-h-[44px] sm:min-h-0 border-b-2 text-xs font-medium flex-1 transition cursor-pointer ${
             activeTab === 'details'
@@ -114,6 +137,8 @@ export function ContextInspector() {
 
         <button
           type="button"
+          role="tab"
+          aria-selected={activeTab === 'changes'}
           onClick={() => setActiveTab('changes')}
           className={`flex items-center justify-center gap-1.5 px-3 py-2 sm:py-1.5 min-h-[44px] sm:min-h-0 border-b-2 text-xs font-medium flex-1 transition cursor-pointer ${
             activeTab === 'changes'

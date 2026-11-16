@@ -58,6 +58,18 @@ export type BlockData =
   | FileBlockData
   | CodeBlockData;
 
+export interface FolderStructureNode {
+  id: string;
+  name: string;
+  path: string;
+  isFolder: boolean;
+  blockId?: string;
+  parentBlockId?: string;
+  groupId?: string;
+  tetherLabel?: string;
+  children: FolderStructureNode[];
+}
+
 export interface Block<T extends BlockData = BlockData> {
   id: string;
   projectId: string;
@@ -65,6 +77,10 @@ export interface Block<T extends BlockData = BlockData> {
   kind: BlockKind;
   title: string;
   sourcePath?: string;
+  originalSourcePath?: string;
+  tetherParentId?: string;
+  isInFolderStructure?: boolean;
+  projectCategory?: string;
   activeRevisionId?: string;
   x: number;
   y: number;
@@ -107,6 +123,7 @@ export interface Project {
   id: string;
   name: string;
   githubLink?: GitHubRepoLink;
+  folderStructure?: FolderStructureNode[];
   createdAt: number;
   updatedAt: number;
 }
@@ -208,12 +225,116 @@ export interface AuditFinding {
   message: string;
   ruleId?: string;
   file?: string;
+  blockId?: string;
+  category?:
+    | 'syntax'
+    | 'semantic'
+    | 'logic'
+    | 'types'
+    | 'imports'
+    | 'structure'
+    | 'security'
+    | 'runtime'
+    | 'knowledge-gap';
+  fixable?: boolean;
+  suggestion?: string;
   line?: number;
   column?: number;
   endLine?: number;
   endColumn?: number;
   from?: number;
   to?: number;
+}
+
+export type AuditTargetType = 'block' | 'file' | 'folder' | 'selection' | 'project';
+
+export interface AuditVerificationProof {
+  compiledCleanly: boolean;
+  typeCheckedCleanly: boolean;
+  runtimeVerified: boolean;
+  geminiAudited: boolean;
+  checksRun: string[];
+  summary: string;
+}
+
+export interface AuditKnowledgeGap {
+  id: string;
+  blockId?: string;
+  file: string;
+  language: string;
+  frameworkOrTopic: string;
+  reason: string;
+  suggestedQuery: string;
+}
+
+export interface AuditTargetFileReport {
+  blockId: string;
+  path: string;
+  title: string;
+  language: string;
+  passed: boolean;
+  testable: boolean;
+  errorCount: number;
+  warningCount: number;
+  findings: AuditFinding[];
+  knowledgeGaps: AuditKnowledgeGap[];
+  contentHash: string;
+  verification?: AuditVerificationProof;
+}
+
+export interface TargetAuditReport {
+  targetType: AuditTargetType;
+  targetLabel: string;
+  projectId: string;
+  auditedAt: number;
+  filesAudited: number;
+  passed: boolean;
+  testable: boolean;
+  errorCount: number;
+  warningCount: number;
+  fileReports: AuditTargetFileReport[];
+  findings: AuditFinding[];
+  knowledgeGaps: AuditKnowledgeGap[];
+  contentHashes: Record<string, string>;
+  verification?: AuditVerificationProof;
+}
+
+export interface AutofixWebSource {
+  title: string;
+  uri: string;
+  query?: string;
+}
+
+export interface AutofixStepLog {
+  id: string;
+  iteration: number;
+  phase:
+    | 'audit'
+    | 'verify'
+    | 'gemini-audit'
+    | 'fix'
+    | 'web-search'
+    | 're-audit'
+    | 'clean'
+    | 'stopped'
+    | 'unresolved';
+  message: string;
+  filePath?: string;
+  errorCount?: number;
+  warningCount?: number;
+  sources?: AutofixWebSource[];
+  timestamp: number;
+}
+
+export interface AutofixSessionResult {
+  status: 'clean' | 'stopped' | 'unresolved' | 'declined';
+  iterations: number;
+  report: TargetAuditReport;
+  steps: AutofixStepLog[];
+  modifiedBlockIds: string[];
+  webSources: AutofixWebSource[];
+  remainingReason?: string;
+  verification?: AuditVerificationProof;
 }
 
 /**

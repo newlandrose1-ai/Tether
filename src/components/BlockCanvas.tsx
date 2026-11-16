@@ -19,6 +19,7 @@ import { BlockNode } from './BlockNode';
 import { TetherEdge } from './TetherEdge';
 import { FolderNode } from './FolderNode';
 import type { UploadBlockData, FileBlockData, Block } from '../types/model';
+import { isBlockPreviewTabCollapsed } from '../lib/tetherFolderSync';
 import { getMimeType, isTextFile } from '../lib/zip';
 import {
   Plus,
@@ -34,7 +35,20 @@ import {
   ChevronsLeft,
   ChevronsRight,
   Maximize,
+  FolderPlus,
+  ImagePlus,
 } from 'lucide-react';
+import {
+  PROJECT_CATEGORIES,
+  PROJECT_CATEGORY_GROUP_LABELS,
+  type ProjectCategoryGroup,
+} from '../lib/projectCategories';
+import {
+  buildAssetTargetPath,
+  inferMediaRoleAndFolder,
+  isImageFilenameOrMime,
+  readBrowserImageFile,
+} from '../lib/imageAssets';
 
 const nodeTypes: NodeTypes = {
   blockNode: BlockNode,
@@ -63,14 +77,20 @@ export function BlockCanvas() {
   const batchUpdateBlocks = useWorkspaceStore((s) => s.batchUpdateBlocks);
   const updateBlockData = useWorkspaceStore((s) => s.updateBlockData);
   const createBlock = useWorkspaceStore((s) => s.createBlock);
+  const createBlockFromCategory = useWorkspaceStore((s) => s.createBlockFromCategory);
   const createTether = useWorkspaceStore((s) => s.createTether);
   const setConnectingSourceBlockId = useWorkspaceStore((s) => s.setConnectingSourceBlockId);
   const requestFocusViewport = useWorkspaceStore((s) => s.requestFocusViewport);
+  const openImageModal = useWorkspaceStore((s) => s.openImageModal);
+  const addImageAssetsToProject = useWorkspaceStore((s) => s.addImageAssetsToProject);
+  const setImageFeedback = useWorkspaceStore((s) => s.setImageFeedback);
 
   const rfInstanceRef = useRef<ReactFlowInstance | null>(null);
   const directFileInputRef = useRef<HTMLInputElement>(null);
   const [isCanvasDraggingOver, setIsCanvasDraggingOver] = useState(false);
   const [isAddMenuOpen, setIsAddMenuOpen] = useState(false);
+  const [isTemplateMenuOpen, setIsTemplateMenuOpen] = useState(false);
+  const [isEmptyTemplatesOpen, setIsEmptyTemplatesOpen] = useState(false);
   const [isLayoutMenuOpen, setIsLayoutMenuOpen] = useState(false);
   const [isDockCollapsed, setIsDockCollapsed] = useState(false);
   const dockRef = useRef<HTMLDivElement>(null);
@@ -79,14 +99,36 @@ export function BlockCanvas() {
     const handleClickOutside = (e: MouseEvent) => {
       if (dockRef.current && !dockRef.current.contains(e.target as globalThis.Node)) {
         setIsAddMenuOpen(false);
+        setIsTemplateMenuOpen(false);
         setIsLayoutMenuOpen(false);
       }
     };
-    if (isAddMenuOpen || isLayoutMenuOpen) {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (isTemplateMenuOpen) {
+        setIsTemplateMenuOpen(false);
+      } else if (isAddMenuOpen || isLayoutMenuOpen) {
+        setIsAddMenuOpen(false);
+        setIsLayoutMenuOpen(false);
+      } else if (connectingSourceBlockId) {
+        setConnectingSourceBlockId(null);
+      }
+    };
+    if (isAddMenuOpen || isTemplateMenuOpen || isLayoutMenuOpen || connectingSourceBlockId) {
       document.addEventListener('mousedown', handleClickOutside);
-      return () => document.removeEventListener('mousedown', handleClickOutside);
+      window.addEventListener('keydown', handleKeyDown);
+      return () => {
+        document.removeEventListener('mousedown', handleClickOutside);
+        window.removeEventListener('keydown', handleKeyDown);
+      };
     }
-  }, [isAddMenuOpen, isLayoutMenuOpen]);
+  }, [
+    isAddMenuOpen,
+    isTemplateMenuOpen,
+    isLayoutMenuOpen,
+    connectingSourceBlockId,
+    setConnectingSourceBlockId,
+  ]);
 
   const activeGroup = groups.find((g) => g.id === activeGroupId);
   const folderDragStartPos = useRef<Record<string, { x: number; y: number }>>({});
@@ -124,19 +166,86 @@ export function BlockCanvas() {
     return groupBlocks.filter((b) => b.kind === 'upload');
   }, [groupBlocks]);
 
+  // Filter tethers for active project and active group
+  const groupTethers = useMemo(() => {
+    if (!activeProjectId || !activeGroupId) return [];
+    return tethers.filter(
+      (t) => t.projectId === activeProjectId && t.groupId === activeGroupId
+    );
+  }, [tethers, activeProjectId, activeGroupId]);
+
+  // Precompute tether metadata & upload folder paths once per group change
+  const {
+    tetheredTargetIds,
+    tetherCountByBlockId,
+    tetherParentTitleByBlockId,
+    uploadFolderPathsMap,
+  } = useMemo(() => {
+    const blockMap = new Map(groupBlocks.map((b) => [b.id, b]));
+    const targetIds = new Set<string>();
+    const counts = new Map<string, number>();
+    const parentTitles = new Map<string, string>();
+
+    for (const t of groupTethers) {
+      counts.set(t.sourceBlockId, (counts.get(t.sourceBlockId) ?? 0) + 1);
+      counts.set(t.targetBlockId, (counts.get(t.targetBlockId) ?? 0) + 1);
+      const isCopyEdge = (t.label || '').trim().toLowerCase() === 'copied from';
+      if (!isCopyEdge) {
+        targetIds.add(t.targetBlockId);
+        if (!parentTitles.has(t.targetBlockId)) {
+          const src = blockMap.get(t.sourceBlockId);
+          if (src) parentTitles.set(t.targetBlockId, src.title);
+        }
+      }
+    }
+
+    for (const b of groupBlocks) {
+      if (b.tetherParentId) {
+        targetIds.add(b.id);
+        const parent = blockMap.get(b.tetherParentId);
+        if (parent) parentTitles.set(b.id, parent.title);
+      }
+    }
+
+    const folderMap = new Map<string, string[]>();
+    for (const u of uploadBlocks) {
+      const ids = new Set((u.data as UploadBlockData)?.extractedBlockIds ?? []);
+      const paths = new Set<string>();
+      for (const b of groupBlocks) {
+        if (b.kind === 'file' && ids.has(b.id)) {
+          const fp = (b.data as FileBlockData)?.parentFolderPath;
+          if (fp) paths.add(fp);
+        }
+      }
+      folderMap.set(u.id, Array.from(paths));
+    }
+
+    return {
+      tetheredTargetIds: targetIds,
+      tetherCountByBlockId: counts,
+      tetherParentTitleByBlockId: parentTitles,
+      uploadFolderPathsMap: folderMap,
+    };
+  }, [groupBlocks, groupTethers, uploadBlocks]);
+
   const anyCollapsed = useMemo(() => {
-    return groupBlocks.some((b) => b.collapsed);
-  }, [groupBlocks]);
+    return groupBlocks.some((b) =>
+      isBlockPreviewTabCollapsed(b, tetheredTargetIds.has(b.id))
+    );
+  }, [groupBlocks, tetheredTargetIds]);
 
   const handleToggleExpandAllBlocks = useCallback(async () => {
     const targetState = !anyCollapsed;
     const updates = groupBlocks
-      .filter((b) => b.collapsed !== targetState)
+      .filter(
+        (b) =>
+          isBlockPreviewTabCollapsed(b, tetheredTargetIds.has(b.id)) !== targetState
+      )
       .map((b) => ({ id: b.id, patch: { collapsed: targetState } }));
     if (updates.length > 0) {
       await batchUpdateBlocks(updates);
     }
-  }, [anyCollapsed, groupBlocks, batchUpdateBlocks]);
+  }, [anyCollapsed, groupBlocks, tetheredTargetIds, batchUpdateBlocks]);
 
   const handleAutoOrganize = useCallback(async () => {
     if (groupBlocks.length === 0) return;
@@ -170,7 +279,10 @@ export function BlockCanvas() {
       }
 
       for (const file of files) {
-        const isCollapsed = Boolean(file.collapsed);
+        const isCollapsed = isBlockPreviewTabCollapsed(
+          file,
+          tetheredTargetIds.has(file.id)
+        );
         const cardHeight = isCollapsed ? 52 : (file.height || 260);
 
         updates.push({
@@ -187,7 +299,7 @@ export function BlockCanvas() {
     if (updates.length > 0) {
       await batchUpdateBlocks(updates);
     }
-  }, [groupBlocks, batchUpdateBlocks]);
+  }, [groupBlocks, tetheredTargetIds, batchUpdateBlocks]);
 
   // Smoothly pan React Flow viewport to requested block
   useEffect(() => {
@@ -195,15 +307,19 @@ export function BlockCanvas() {
     const target = blocks.find((b) => b.id === focusViewportRequest.blockId);
     const inst = rfInstanceRef.current;
     if (target && inst) {
-      const centerX = target.x + (target.width ?? 340) / 2;
-      const centerY = target.y + (target.collapsed ? 30 : 120);
+      const isCollapsed = isBlockPreviewTabCollapsed(
+        target,
+        tetheredTargetIds.has(target.id)
+      );
+      const centerX = target.x + (target.width ?? 320) / 2;
+      const centerY = target.y + (isCollapsed ? 28 : 120);
       inst.setCenter(centerX, centerY, {
         zoom: Math.max(inst.getZoom(), 0.85),
         duration: 280,
       });
     }
     requestFocusViewport(null);
-  }, [focusViewportRequest, blocks, requestFocusViewport]);
+  }, [focusViewportRequest, blocks, tetheredTargetIds, requestFocusViewport]);
 
   // Precompute child->upload mapping for O(1) lookup
   const uploadParentByChildId = useMemo(() => {
@@ -259,14 +375,6 @@ export function BlockCanvas() {
     [uploadParentByChildId, canvasCollapsedFolders]
   );
 
-  // Filter tethers for active project and active group
-  const groupTethers = useMemo(() => {
-    if (!activeProjectId || !activeGroupId) return [];
-    return tethers.filter(
-      (t) => t.projectId === activeProjectId && t.groupId === activeGroupId
-    );
-  }, [tethers, activeProjectId, activeGroupId]);
-
   const connectingSourceBlock = useMemo(
     () => (connectingSourceBlockId ? blocks.find((b) => b.id === connectingSourceBlockId) : undefined),
     [blocks, connectingSourceBlockId]
@@ -309,6 +417,11 @@ export function BlockCanvas() {
           isConnectingSource,
           isValidTarget,
           isInvalidTarget,
+          isTetheredChild: tetheredTargetIds.has(b.id),
+          tetherCount: tetherCountByBlockId.get(b.id) ?? 0,
+          tetherParentTitle: tetherParentTitleByBlockId.get(b.id),
+          extractedFolderPaths:
+            b.kind === 'upload' ? uploadFolderPathsMap.get(b.id) : undefined,
         },
         selected: b.id === selectedBlockId,
       };
@@ -376,8 +489,10 @@ export function BlockCanvas() {
       }
     }
 
-    // Create folder grouping nodes for non-upload project files
-    const nonUploadFiles = groupBlocks.filter((b) => !uploadParentByChildId.has(b.id));
+    // Create folder grouping nodes ONLY for synced non-upload tethered files
+    const nonUploadFiles = groupBlocks.filter(
+      (b) => !uploadParentByChildId.has(b.id) && Boolean(b.isInFolderStructure)
+    );
 
     const projectFolders = new Map<string, Block[]>();
     for (const b of nonUploadFiles) {
@@ -433,6 +548,10 @@ export function BlockCanvas() {
     uploadParentByChildId,
     canvasCollapsedFolders,
     handleToggleProjectFolder,
+    tetheredTargetIds,
+    tetherCountByBlockId,
+    tetherParentTitleByBlockId,
+    uploadFolderPathsMap,
   ]);
 
   // Set of visible node IDs to ensure collapsed tethers are visually hidden but preserved in store
@@ -665,6 +784,17 @@ export function BlockCanvas() {
     selectBlock(block.id);
   };
 
+  const handleCreateCategoryBlock = async (categoryId: string) => {
+    if (!activeProjectId || !activeGroupId) return;
+    const count = groupBlocks.length;
+    const x = 120 + (count % 3) * 340;
+    const y = 80 + Math.floor(count / 3) * 260;
+    const block = await createBlockFromCategory(activeProjectId, activeGroupId, categoryId, { x, y });
+    if (block) {
+      selectBlock(block.id);
+    }
+  };
+
   // Direct file / document / PDF upload handler
   const handleDirectFilesUpload = async (fileList: FileList | File[]) => {
     if (!activeProjectId || !activeGroupId || fileList.length === 0) return;
@@ -758,13 +888,48 @@ export function BlockCanvas() {
         continue;
       }
 
-      // 3. If it's a text/code/markdown/structured document
+      // 3. If it's an image / SVG / favicon asset -> smart media placement
       const resolvedMime = file.type || getMimeType(file.name);
+      if (isImageFilenameOrMime(file.name, resolvedMime)) {
+        try {
+          const read = await readBrowserImageFile(file);
+          const inferred = inferMediaRoleAndFolder(read.fileName);
+          const { createdBlocks } = await addImageAssetsToProject({
+            projectId: activeProjectId,
+            groupId: activeGroupId,
+            items: [
+              {
+                fileName: read.fileName,
+                mimeType: read.mimeType,
+                size: read.size,
+                binary: read.binary,
+                dataUrl: read.dataUrl,
+                content: read.content,
+                mediaCategory: inferred.categoryId,
+                folderPath: inferred.folder,
+              },
+            ],
+            defaultMediaCategory: inferred.categoryId,
+            defaultFolderPath: inferred.folder,
+          });
+          if (createdBlocks[0]) {
+            const targetPath = buildAssetTargetPath(createdBlocks[0].title, inferred.folder);
+            setImageFeedback(`Added image to ${targetPath}`);
+          }
+        } catch (err) {
+          setImageFeedback(
+            (err as Error).message || `Failed to load image ${file.name}.`,
+            'error'
+          );
+        }
+        continue;
+      }
+
+      // 4. If it's a text/code/markdown/structured document
       const isLikelyText =
         resolvedMime.startsWith('text/') ||
         resolvedMime === 'application/json' ||
         resolvedMime === 'application/xml' ||
-        resolvedMime === 'image/svg+xml' ||
         isTextFile(file.name);
 
       if (isLikelyText) {
@@ -793,7 +958,7 @@ export function BlockCanvas() {
         continue;
       }
 
-      // 4. Any other binary, image, audio, video, or document file
+      // 5. Any other binary, audio, video, or document file
       const reader = new FileReader();
       reader.onload = async (event) => {
         const dataUrl = event.target?.result as string;
@@ -896,7 +1061,8 @@ export function BlockCanvas() {
             type="button"
             onClick={() => setConnectingSourceBlockId(null)}
             className="text-zinc-400 hover:text-zinc-100 p-0.5 hover:bg-zinc-800/80 rounded transition cursor-pointer"
-            title="Cancel tether"
+            title="Cancel tether (Esc)"
+            aria-label="Cancel tether connection"
           >
             <X className="w-3.5 h-3.5" />
           </button>
@@ -951,6 +1117,61 @@ export function BlockCanvas() {
                 <FileArchive className="w-3.5 h-3.5 text-orange-400" />
                 <span>+ ZIP Archive</span>
               </button>
+              <button
+                type="button"
+                onClick={() => openImageModal()}
+                className="col-span-2 py-2 px-3 bg-orange-500/15 hover:bg-orange-500/25 text-orange-100 hover:text-white text-xs rounded-lg transition border border-orange-500/50 hover:border-orange-500/80 flex items-center justify-center gap-1.5 cursor-pointer font-medium"
+              >
+                <ImagePlus className="w-3.5 h-3.5 text-orange-400" />
+                <span>+ Add Image / Favicon / Gallery</span>
+              </button>
+            </div>
+
+            <div className="pt-1 border-t border-zinc-800/80 font-mono">
+              <button
+                type="button"
+                onClick={() => setIsEmptyTemplatesOpen((prev) => !prev)}
+                aria-expanded={isEmptyTemplatesOpen}
+                className="w-full py-1.5 px-3 bg-zinc-900/60 hover:bg-orange-500/15 text-zinc-300 hover:text-orange-100 text-[11px] rounded-lg transition border border-zinc-700/60 hover:border-orange-500/50 flex items-center justify-between cursor-pointer"
+              >
+                <span className="flex items-center gap-1.5">
+                  <FolderPlus className="w-3.5 h-3.5 text-orange-400" />
+                  <span>+ Project File / Folder Template</span>
+                </span>
+                <ChevronDown
+                  className={`w-3.5 h-3.5 text-zinc-400 transition-transform ${
+                    isEmptyTemplatesOpen ? 'rotate-180 text-orange-400' : ''
+                  }`}
+                />
+              </button>
+
+              {isEmptyTemplatesOpen && (
+                <div className="mt-2 max-h-48 overflow-y-auto text-left bg-zinc-950/80 border border-zinc-700/75 rounded-lg p-2 space-y-2">
+                  {(['docs', 'deps', 'entry', 'folders', 'media'] as ProjectCategoryGroup[]).map((grp) => (
+                    <div key={grp} className="space-y-1">
+                      <div className="text-[10px] uppercase tracking-wider text-zinc-400 px-1">
+                        {PROJECT_CATEGORY_GROUP_LABELS[grp]}
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {PROJECT_CATEGORIES.filter((c) => c.group === grp).map((cat) => (
+                          <button
+                            key={cat.id}
+                            type="button"
+                            onClick={() => {
+                              setIsEmptyTemplatesOpen(false);
+                              void handleCreateCategoryBlock(cat.id);
+                            }}
+                            className="px-2 py-1 text-[11px] rounded bg-zinc-900 hover:bg-orange-500/20 border border-zinc-700/80 hover:border-orange-500/60 text-zinc-200 hover:text-white transition cursor-pointer"
+                            title={cat.description}
+                          >
+                            {cat.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -981,7 +1202,9 @@ export function BlockCanvas() {
                 <button
                   type="button"
                   onClick={() => {
-                    setIsAddMenuOpen(!isAddMenuOpen);
+                    const next = !isAddMenuOpen;
+                    setIsAddMenuOpen(next);
+                    if (!next) setIsTemplateMenuOpen(false);
                     setIsLayoutMenuOpen(false);
                   }}
                   className={`flex items-center gap-1.5 py-1.5 px-3 rounded-md border transition cursor-pointer font-medium ${
@@ -990,6 +1213,7 @@ export function BlockCanvas() {
                       : 'bg-zinc-900/70 hover:bg-zinc-800/80 text-zinc-100 border-zinc-700/75 hover:border-orange-500/50'
                   }`}
                   aria-expanded={isAddMenuOpen}
+                  aria-haspopup="menu"
                 >
                   <Plus className="w-3.5 h-3.5 text-orange-400" />
                   <span>Add</span>
@@ -997,11 +1221,17 @@ export function BlockCanvas() {
                 </button>
 
                 {isAddMenuOpen && (
-                  <div className="absolute bottom-full mb-2 left-0 w-44 glass-menu border border-zinc-600/80 rounded-lg p-1 space-y-0.5 z-30 animate-panel-in">
+                  <div
+                    role="menu"
+                    aria-label="Add block or template"
+                    className="absolute bottom-full mb-2 left-0 w-52 glass-menu border border-zinc-600/80 rounded-lg p-1 space-y-0.5 z-30 animate-panel-in"
+                  >
                     <button
                       type="button"
+                      role="menuitem"
                       onClick={() => {
                         setIsAddMenuOpen(false);
+                        setIsTemplateMenuOpen(false);
                         handleCreateCodeBlock();
                       }}
                       className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-zinc-200 hover:text-white hover:bg-orange-500/15 rounded transition cursor-pointer"
@@ -1012,8 +1242,10 @@ export function BlockCanvas() {
 
                     <button
                       type="button"
+                      role="menuitem"
                       onClick={() => {
                         setIsAddMenuOpen(false);
+                        setIsTemplateMenuOpen(false);
                         handleCreateTextBlock();
                       }}
                       className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-zinc-200 hover:text-white hover:bg-zinc-800/80 rounded transition cursor-pointer"
@@ -1022,12 +1254,47 @@ export function BlockCanvas() {
                       <span>Note</span>
                     </button>
 
+                    <button
+                      type="button"
+                      role="menuitem"
+                      aria-expanded={isTemplateMenuOpen}
+                      aria-haspopup="menu"
+                      onClick={() => setIsTemplateMenuOpen((prev) => !prev)}
+                      className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left rounded transition cursor-pointer ${
+                        isTemplateMenuOpen
+                          ? 'bg-orange-500/20 text-orange-100'
+                          : 'text-zinc-200 hover:text-white hover:bg-orange-500/15'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        <FolderPlus className="w-3.5 h-3.5 text-orange-400 flex-shrink-0" />
+                        <span>Project Template...</span>
+                      </span>
+                      <ChevronsRight className="w-3.5 h-3.5 text-zinc-400" />
+                    </button>
+
                     <div className="border-t border-zinc-700/70 my-1" />
 
                     <button
                       type="button"
+                      role="menuitem"
                       onClick={() => {
                         setIsAddMenuOpen(false);
+                        setIsTemplateMenuOpen(false);
+                        openImageModal();
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-orange-100 hover:text-white bg-orange-500/10 hover:bg-orange-500/20 rounded transition cursor-pointer"
+                    >
+                      <ImagePlus className="w-3.5 h-3.5 text-orange-400 flex-shrink-0" />
+                      <span>Add Image / Media</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setIsAddMenuOpen(false);
+                        setIsTemplateMenuOpen(false);
                         directFileInputRef.current?.click();
                       }}
                       className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-zinc-200 hover:text-white hover:bg-zinc-800/80 rounded transition cursor-pointer"
@@ -1038,8 +1305,10 @@ export function BlockCanvas() {
 
                     <button
                       type="button"
+                      role="menuitem"
                       onClick={() => {
                         setIsAddMenuOpen(false);
+                        setIsTemplateMenuOpen(false);
                         handleCreateUploadBlock();
                       }}
                       className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-zinc-200 hover:text-white hover:bg-zinc-800/80 rounded transition cursor-pointer"
@@ -1047,6 +1316,43 @@ export function BlockCanvas() {
                       <FileArchive className="w-3.5 h-3.5 text-orange-400 flex-shrink-0" />
                       <span>Upload ZIP</span>
                     </button>
+
+                    {isTemplateMenuOpen && (
+                      <div
+                        role="menu"
+                        aria-label="Project file and folder templates"
+                        className="absolute left-0 bottom-full mb-2 sm:bottom-0 sm:left-full sm:ml-2 sm:mb-0 w-64 max-h-80 overflow-y-auto glass-menu border border-zinc-600/80 rounded-lg p-2 space-y-2.5 z-40 animate-panel-in shadow-2xl"
+                      >
+                        <div className="text-[10px] uppercase tracking-wider text-orange-300 font-semibold px-1 border-b border-zinc-700/70 pb-1">
+                          Create Standard Project File / Folder
+                        </div>
+                        {(['docs', 'deps', 'entry', 'folders', 'media'] as ProjectCategoryGroup[]).map((grp) => (
+                          <div key={grp} className="space-y-1">
+                            <div className="text-[10px] uppercase tracking-wider text-zinc-400 px-1">
+                              {PROJECT_CATEGORY_GROUP_LABELS[grp]}
+                            </div>
+                            <div className="grid grid-cols-2 gap-1">
+                              {PROJECT_CATEGORIES.filter((c) => c.group === grp).map((cat) => (
+                                <button
+                                  key={cat.id}
+                                  type="button"
+                                  role="menuitem"
+                                  onClick={() => {
+                                    setIsAddMenuOpen(false);
+                                    setIsTemplateMenuOpen(false);
+                                    void handleCreateCategoryBlock(cat.id);
+                                  }}
+                                  className="px-2 py-1 text-left text-[11px] rounded bg-zinc-900/90 hover:bg-orange-500/20 border border-zinc-700/70 hover:border-orange-500/60 text-zinc-200 hover:text-white transition cursor-pointer truncate"
+                                  title={cat.description}
+                                >
+                                  {cat.label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1058,6 +1364,7 @@ export function BlockCanvas() {
                   onClick={() => {
                     setIsLayoutMenuOpen(!isLayoutMenuOpen);
                     setIsAddMenuOpen(false);
+                    setIsTemplateMenuOpen(false);
                   }}
                   className={`flex items-center gap-1.5 py-1.5 px-3 rounded-md border transition cursor-pointer font-medium ${
                     isLayoutMenuOpen
@@ -1065,6 +1372,7 @@ export function BlockCanvas() {
                       : 'bg-zinc-900/70 hover:bg-zinc-800/80 text-zinc-300 hover:text-white border-zinc-700/75 hover:border-zinc-500'
                   }`}
                   aria-expanded={isLayoutMenuOpen}
+                  aria-haspopup="menu"
                 >
                   <LayoutGrid className="w-3.5 h-3.5 text-zinc-400" />
                   <span>Layout</span>
@@ -1072,9 +1380,14 @@ export function BlockCanvas() {
                 </button>
 
                 {isLayoutMenuOpen && (
-                  <div className="absolute bottom-full mb-2 left-0 w-44 glass-menu border border-zinc-600/80 rounded-lg p-1 space-y-0.5 z-30 animate-panel-in">
+                  <div
+                    role="menu"
+                    aria-label="Canvas layout options"
+                    className="absolute bottom-full mb-2 left-0 w-44 glass-menu border border-zinc-600/80 rounded-lg p-1 space-y-0.5 z-30 animate-panel-in"
+                  >
                     <button
                       type="button"
+                      role="menuitem"
                       onClick={() => {
                         setIsLayoutMenuOpen(false);
                         handleAutoOrganize();
@@ -1087,6 +1400,7 @@ export function BlockCanvas() {
 
                     <button
                       type="button"
+                      role="menuitem"
                       onClick={() => {
                         setIsLayoutMenuOpen(false);
                         handleToggleExpandAllBlocks();
@@ -1099,6 +1413,7 @@ export function BlockCanvas() {
 
                     <button
                       type="button"
+                      role="menuitem"
                       onClick={() => {
                         setIsLayoutMenuOpen(false);
                         rfInstanceRef.current?.fitView({ padding: 0.18, duration: 280 });
@@ -1146,6 +1461,7 @@ export function BlockCanvas() {
         onPaneClick={handlePaneClick}
         fitView={groupBlocks.length > 0}
         fitViewOptions={{ padding: 0.18, maxZoom: 1.1 }}
+        onlyRenderVisibleElements={true}
         minZoom={0.05}
         maxZoom={3}
         translateExtent={[

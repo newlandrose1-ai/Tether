@@ -8,6 +8,11 @@ import { FindReplaceBar } from './FindReplaceBar';
 import { analyzeCodeStructure } from '../../lib/codeStructure';
 import { computeContentHash } from '../../lib/hash';
 import { getFileTypeInfo } from '../../lib/fileTypes';
+import {
+  PROJECT_CATEGORIES,
+  PROJECT_CATEGORY_GROUP_LABELS,
+  type ProjectCategoryGroup,
+} from '../../lib/projectCategories';
 import { UniversalBlockViewer } from '../viewer/UniversalBlockViewer';
 import {
   createAuditHighlightExtension,
@@ -42,6 +47,8 @@ import {
   PanelRight,
   CheckCircle2,
   Loader2,
+  Wrench,
+  ImagePlus,
 } from 'lucide-react';
 
 import { EditorView, basicSetup } from 'codemirror';
@@ -101,8 +108,12 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
   const closeEditorModal = useWorkspaceStore((s) => s.closeEditorModal);
   const saveCodeDraft = useWorkspaceStore((s) => s.saveCodeDraft);
   const createCodeSnapshot = useWorkspaceStore((s) => s.createCodeSnapshot);
+  const updateBlock = useWorkspaceStore((s) => s.updateBlock);
   const updateBlockData = useWorkspaceStore((s) => s.updateBlockData);
+  const applyBlockProjectCategory = useWorkspaceStore((s) => s.applyBlockProjectCategory);
   const auditBlock = useWorkspaceStore((s) => s.auditBlock);
+  const openAuditModal = useWorkspaceStore((s) => s.openAuditModal);
+  const openImageModal = useWorkspaceStore((s) => s.openImageModal);
   const snipOldBlock = useWorkspaceStore((s) => s.snipOldBlock);
   const isInspectorCollapsed = useWorkspaceStore((s) => s.isInspectorCollapsed);
   const toggleInspector = useWorkspaceStore((s) => s.toggleInspector);
@@ -145,9 +156,18 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
         setIsMoreMenuOpen(false);
       }
     };
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsMoreMenuOpen(false);
+      }
+    };
     if (isMoreMenuOpen) {
       document.addEventListener('mousedown', handleClickOutside);
-      return () => document.removeEventListener('mousedown', handleClickOutside);
+      window.addEventListener('keydown', handleEscape);
+      return () => {
+        document.removeEventListener('mousedown', handleClickOutside);
+        window.removeEventListener('keydown', handleEscape);
+      };
     }
   }, [isMoreMenuOpen]);
 
@@ -171,7 +191,11 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
     return '';
   }, [activeBlock]);
 
-  const draftContent = activeBlock ? (draftByBlockId[activeBlock.id] ?? originalContent) : '';
+  const draftContent = activeBlock
+    ? dirtyBlockIds.has(activeBlock.id)
+      ? (draftByBlockId[activeBlock.id] ?? originalContent)
+      : originalContent
+    : '';
 
   const blockPath = useMemo(() => {
     if (!activeBlock) return '';
@@ -471,15 +495,24 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
         handleSave();
+        return;
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
         e.preventDefault();
         setShowFindReplace((prev) => !prev);
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (isPromptingSnapshot) {
+          setIsPromptingSnapshot(false);
+        } else if (showFindReplace) {
+          setShowFindReplace(false);
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleSave]);
+  }, [handleSave, isPromptingSnapshot, showFindReplace]);
 
   const handleCreateSnapshot = async () => {
     if (!activeBlock || activeBlock.kind !== 'code') return;
@@ -514,6 +547,38 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
     }
     return list;
   }, [activeProject, activeBlock, blockPath]);
+
+  const handleCloseTab = useCallback(
+    (blockId: string) => {
+      setDraftByBlockId((prev) => {
+        if (!(blockId in prev)) return prev;
+        const next = { ...prev };
+        delete next[blockId];
+        return next;
+      });
+      setDirtyBlockIds((prev) => {
+        if (!prev.has(blockId)) return prev;
+        const next = new Set(prev);
+        next.delete(blockId);
+        return next;
+      });
+      closeBlockTab(blockId);
+    },
+    [closeBlockTab]
+  );
+
+  const handleCloseOtherTabs = useCallback(
+    (keepBlockId: string) => {
+      setDraftByBlockId((prev) =>
+        keepBlockId in prev ? { [keepBlockId]: prev[keepBlockId] } : {}
+      );
+      setDirtyBlockIds((prev) =>
+        prev.has(keepBlockId) ? new Set([keepBlockId]) : new Set()
+      );
+      closeOtherTabs(keepBlockId);
+    },
+    [closeOtherTabs]
+  );
 
   const handleCloseEditor = () => {
     if (onClose) onClose();
@@ -556,8 +621,8 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
         activeId={activeEditorBlockId}
         dirtyBlockIds={dirtyBlockIds}
         onSelectTab={setActiveEditorBlockId}
-        onCloseTab={closeBlockTab}
-        onCloseOthers={closeOtherTabs}
+        onCloseTab={handleCloseTab}
+        onCloseOthers={handleCloseOtherTabs}
       />
 
       {/* 2. Breadcrumb & Action Toolbar */}
@@ -606,10 +671,15 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
 
             {/* View Mode Toggle: Sections / Raw / Rendered Preview */}
             {isTextEditable && (
-              <div className="flex items-center bg-zinc-950/80 border border-zinc-700/80 rounded p-0.5 text-[11px]">
+              <div
+                role="group"
+                aria-label="Editor view mode"
+                className="flex items-center bg-zinc-950/80 border border-zinc-700/80 rounded p-0.5 text-[11px]"
+              >
                 <button
                   type="button"
                   onClick={() => setEditorMode('modular')}
+                  aria-pressed={effectiveMode === 'modular'}
                   className={`flex items-center gap-1 px-2.5 py-0.5 rounded transition cursor-pointer whitespace-nowrap shrink-0 border ${
                     effectiveMode === 'modular'
                       ? 'bg-orange-500/15 border-orange-500/40 text-zinc-100 font-semibold'
@@ -623,6 +693,7 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
                 <button
                   type="button"
                   onClick={() => setEditorMode('unified')}
+                  aria-pressed={effectiveMode === 'unified'}
                   className={`flex items-center gap-1 px-2.5 py-0.5 rounded transition cursor-pointer whitespace-nowrap shrink-0 border ${
                     effectiveMode === 'unified'
                       ? 'bg-orange-500/15 border-orange-500/40 text-zinc-100 font-semibold'
@@ -637,6 +708,7 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
                   <button
                     type="button"
                     onClick={() => setEditorMode('preview')}
+                    aria-pressed={effectiveMode === 'preview'}
                     className={`flex items-center gap-1 px-2.5 py-0.5 rounded transition cursor-pointer whitespace-nowrap shrink-0 border ${
                       effectiveMode === 'preview'
                         ? 'bg-orange-500/15 border-orange-500/40 text-zinc-100 font-semibold'
@@ -651,33 +723,105 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
               </div>
             )}
 
-            {/* Run Audit Button */}
+            {/* Run Audit & Deep Autofix Controls */}
             {isTextEditable && (
-              <button
-                type="button"
-                onClick={handleRunAudit}
-                disabled={isAuditing}
-                className={`flex items-center gap-1.5 px-2.5 py-1 min-h-[30px] rounded text-xs transition cursor-pointer whitespace-nowrap shrink-0 border font-medium ${
-                  isAuditPassed
-                    ? 'bg-emerald-950/60 border-emerald-700/80 text-emerald-300 hover:bg-emerald-900/60'
-                    : isAuditFailed
-                    ? 'bg-red-950/70 border-red-700/80 text-red-200 hover:bg-red-900/70'
-                    : 'bg-orange-500/20 border-orange-500/70 text-orange-100 hover:bg-orange-500/30'
-                }`}
-                title="Run code audit and highlight errors"
-              >
-                {isAuditing ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <ShieldCheck className="w-3.5 h-3.5" />
-                )}
-                <span>{isAuditing ? 'Auditing...' : 'Audit'}</span>
-                {findings.length > 0 && (
-                  <span className="tabular-nums text-[10px] font-semibold opacity-90">
-                    ({errorCount > 0 ? `${errorCount}E` : `${warningCount}W`})
-                  </span>
-                )}
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={handleRunAudit}
+                  disabled={isAuditing}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 min-h-[30px] rounded text-xs transition cursor-pointer whitespace-nowrap shrink-0 border font-medium ${
+                    isAuditPassed
+                      ? 'bg-emerald-950/60 border-emerald-700/80 text-emerald-300 hover:bg-emerald-900/60'
+                      : isAuditFailed
+                      ? 'bg-red-950/70 border-red-700/80 text-red-200 hover:bg-red-900/70'
+                      : 'bg-orange-500/20 border-orange-500/70 text-orange-100 hover:bg-orange-500/30'
+                  }`}
+                  title="Run code audit and highlight errors"
+                >
+                  {isAuditing ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                  )}
+                  <span>{isAuditing ? 'Auditing...' : 'Audit'}</span>
+                  {findings.length > 0 && (
+                    <span className="tabular-nums text-[10px] font-semibold opacity-90">
+                      ({errorCount > 0 ? `${errorCount}E` : `${warningCount}W`})
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const targetId = activeBlock.id;
+                    const syncThenOpen = async () => {
+                      if (isDirty) {
+                        await saveCodeDraft(targetId, draftContent);
+                        setDirtyBlockIds((prev) => {
+                          const next = new Set(prev);
+                          next.delete(targetId);
+                          return next;
+                        });
+                      }
+                      setDraftByBlockId((prev) => {
+                        if (!(targetId in prev)) return prev;
+                        const next = { ...prev };
+                        delete next[targetId];
+                        return next;
+                      });
+                      openAuditModal({ targetType: 'block', blockId: targetId });
+                    };
+                    void syncThenOpen();
+                  }}
+                  className="hidden sm:flex items-center gap-1 px-2 py-1 min-h-[30px] bg-zinc-900/80 hover:bg-orange-500/20 border border-zinc-700/80 hover:border-orange-500/60 text-zinc-300 hover:text-orange-100 rounded text-xs transition cursor-pointer whitespace-nowrap shrink-0"
+                  title="Open Gemini Deep Audit & Autofix Loop for this block"
+                >
+                  <Wrench className="w-3.5 h-3.5 text-orange-400" />
+                  <span>Verify &amp; Fix</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const targetId = activeBlock.id;
+                    const kind = activeBlock.kind;
+                    const syncThenOpenImage = async () => {
+                      if (isDirty) {
+                        if (kind === 'code') {
+                          await saveCodeDraft(targetId, draftContent);
+                        } else if (kind === 'text') {
+                          await updateBlockData(targetId, { content: draftContent });
+                        } else if (kind === 'file') {
+                          await updateBlockData(targetId, {
+                            content: draftContent,
+                            size: new TextEncoder().encode(draftContent).byteLength,
+                          });
+                        }
+                        setDirtyBlockIds((prev) => {
+                          const next = new Set(prev);
+                          next.delete(targetId);
+                          return next;
+                        });
+                      }
+                      setDraftByBlockId((prev) => {
+                        if (!(targetId in prev)) return prev;
+                        const next = { ...prev };
+                        delete next[targetId];
+                        return next;
+                      });
+                      openImageModal({ targetCodeBlockId: targetId });
+                    };
+                    void syncThenOpenImage();
+                  }}
+                  className="hidden sm:flex items-center gap-1 px-2 py-1 min-h-[30px] bg-zinc-900/80 hover:bg-orange-500/20 border border-zinc-700/80 hover:border-orange-500/60 text-zinc-300 hover:text-orange-100 rounded text-xs transition cursor-pointer whitespace-nowrap shrink-0"
+                  title="Add or attach images / favicon / gallery into this file"
+                >
+                  <ImagePlus className="w-3.5 h-3.5 text-orange-400" />
+                  <span>+ Image</span>
+                </button>
+              </div>
             )}
 
             {/* Find & Replace Toggle */}
@@ -721,12 +865,139 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
                 title="More file actions and section controls"
                 aria-label="More file actions"
                 aria-expanded={isMoreMenuOpen}
+                aria-haspopup="menu"
               >
                 <MoreHorizontal className="w-3.5 h-3.5" />
               </button>
 
               {isMoreMenuOpen && (
-                <div className="absolute right-0 top-full mt-1.5 w-52 glass-menu border border-zinc-600/80 rounded-lg p-1.5 font-mono text-xs space-y-1 z-30 animate-panel-in">
+                <div
+                  role="menu"
+                  aria-label="More file actions"
+                  className="absolute right-0 top-full mt-1.5 w-60 glass-menu border border-zinc-600/80 rounded-lg p-1.5 font-mono text-xs space-y-1 z-30 animate-panel-in"
+                >
+                  {isTextEditable && (
+                    <div className="sm:hidden space-y-0.5 pb-1.5 mb-1 border-b border-zinc-700/70">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setIsMoreMenuOpen(false);
+                          const targetId = activeBlock.id;
+                          const syncThenOpen = async () => {
+                            if (isDirty) {
+                              await saveCodeDraft(targetId, draftContent);
+                              setDirtyBlockIds((prev) => {
+                                const next = new Set(prev);
+                                next.delete(targetId);
+                                return next;
+                              });
+                            }
+                            setDraftByBlockId((prev) => {
+                              if (!(targetId in prev)) return prev;
+                              const next = { ...prev };
+                              delete next[targetId];
+                              return next;
+                            });
+                            openAuditModal({ targetType: 'block', blockId: targetId });
+                          };
+                          void syncThenOpen();
+                        }}
+                        className="w-full flex items-center gap-2 px-2 py-1.5 text-left text-zinc-200 hover:text-white hover:bg-orange-500/15 rounded transition cursor-pointer"
+                      >
+                        <Wrench className="w-3.5 h-3.5 text-orange-400" />
+                        <span>Verify &amp; Fix</span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setIsMoreMenuOpen(false);
+                          const targetId = activeBlock.id;
+                          const kind = activeBlock.kind;
+                          const syncThenOpenImage = async () => {
+                            if (isDirty) {
+                              if (kind === 'code') {
+                                await saveCodeDraft(targetId, draftContent);
+                              } else if (kind === 'text') {
+                                await updateBlockData(targetId, { content: draftContent });
+                              } else if (kind === 'file') {
+                                await updateBlockData(targetId, {
+                                  content: draftContent,
+                                  size: new TextEncoder().encode(draftContent).byteLength,
+                                });
+                              }
+                              setDirtyBlockIds((prev) => {
+                                const next = new Set(prev);
+                                next.delete(targetId);
+                                return next;
+                              });
+                            }
+                            setDraftByBlockId((prev) => {
+                              if (!(targetId in prev)) return prev;
+                              const next = { ...prev };
+                              delete next[targetId];
+                              return next;
+                            });
+                            openImageModal({ targetCodeBlockId: targetId });
+                          };
+                          void syncThenOpenImage();
+                        }}
+                        className="w-full flex items-center gap-2 px-2 py-1.5 text-left text-zinc-200 hover:text-white hover:bg-orange-500/15 rounded transition cursor-pointer"
+                      >
+                        <ImagePlus className="w-3.5 h-3.5 text-orange-400" />
+                        <span>+ Add Image / Media</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {activeBlock.kind !== 'upload' && isTextEditable && (
+                    <div className="px-1.5 py-1 space-y-1 border-b border-zinc-700/70 pb-2 mb-1">
+                      <label
+                        htmlFor="editor-project-category-select"
+                        className="text-[10px] uppercase tracking-wider text-zinc-400 font-semibold block"
+                      >
+                        Project Category
+                      </label>
+                      <select
+                        id="editor-project-category-select"
+                        value={activeBlock.projectCategory || ''}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          const targetId = activeBlock.id;
+                          if (!val) {
+                            void updateBlock(targetId, { projectCategory: undefined });
+                          } else {
+                            void applyBlockProjectCategory(targetId, val).then(() => {
+                              // Drop empty/stale local draft so template or preserved content stays in sync
+                              setDraftByBlockId((prev) => {
+                                const current = prev[targetId];
+                                if (current !== undefined && current.trim().length === 0) {
+                                  const next = { ...prev };
+                                  delete next[targetId];
+                                  return next;
+                                }
+                                return prev;
+                              });
+                            });
+                          }
+                        }}
+                        className="w-full bg-zinc-900/90 border border-zinc-700/80 hover:border-orange-500/60 focus:border-orange-500 rounded px-2 py-1 text-[11px] text-zinc-100 outline-none cursor-pointer"
+                      >
+                        <option value="">Custom / Unassigned</option>
+                        {(['docs', 'deps', 'entry', 'folders', 'media'] as ProjectCategoryGroup[]).map((grp) => (
+                          <optgroup key={grp} label={PROJECT_CATEGORY_GROUP_LABELS[grp]}>
+                            {PROJECT_CATEGORIES.filter((c) => c.group === grp).map((cat) => (
+                              <option key={cat.id} value={cat.id}>
+                                {cat.label}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
                   {editorMode === 'modular' && (
                     <>
                       <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-zinc-400 font-semibold">
@@ -734,6 +1005,7 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
                       </div>
                       <button
                         type="button"
+                        role="menuitem"
                         onClick={() => {
                           setIsMoreMenuOpen(false);
                           handleExpandAll();
@@ -745,6 +1017,7 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
                       </button>
                       <button
                         type="button"
+                        role="menuitem"
                         onClick={() => {
                           setIsMoreMenuOpen(false);
                           handleCollapseAll();
@@ -761,6 +1034,7 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
                   {activeBlock.kind === 'code' && (
                     <button
                       type="button"
+                      role="menuitem"
                       onClick={() => {
                         setIsMoreMenuOpen(false);
                         setIsPromptingSnapshot(true);
@@ -774,11 +1048,16 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
 
                   <button
                     type="button"
-                    onClick={() => {
+                    role="menuitem"
+                    onClick={async () => {
                       const fullPath = blockPath || activeBlock.title;
-                      navigator.clipboard.writeText(fullPath);
-                      setCopiedPath(true);
-                      setTimeout(() => setCopiedPath(false), 1500);
+                      try {
+                        await navigator.clipboard.writeText(fullPath);
+                        setCopiedPath(true);
+                        setTimeout(() => setCopiedPath(false), 1500);
+                      } catch {
+                        // Clipboard unavailable in restricted context
+                      }
                       setIsMoreMenuOpen(false);
                     }}
                     className="w-full flex items-center gap-2 px-2 py-1.5 text-left text-zinc-200 hover:text-white hover:bg-zinc-800/80 rounded transition cursor-pointer"
@@ -924,6 +1203,7 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
           <input
             type="text"
             autoFocus
+            aria-label="Snapshot label"
             placeholder="e.g. before-refactoring, checkpoint-1..."
             value={snapshotLabel}
             onChange={(e) => setSnapshotLabel(e.target.value)}
@@ -1030,7 +1310,39 @@ export function CodeEditorWorkspace({ onClose }: CodeEditorWorkspaceProps) {
               )}
             </button>
 
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1.5">
+              {findings.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const targetId = activeBlock.id;
+                    const syncThenOpen = async () => {
+                      if (isDirty) {
+                        await saveCodeDraft(targetId, draftContent);
+                        setDirtyBlockIds((prev) => {
+                          const next = new Set(prev);
+                          next.delete(targetId);
+                          return next;
+                        });
+                      }
+                      setDraftByBlockId((prev) => {
+                        if (!(targetId in prev)) return prev;
+                        const next = { ...prev };
+                        delete next[targetId];
+                        return next;
+                      });
+                      openAuditModal({ targetType: 'block', blockId: targetId });
+                    };
+                    void syncThenOpen();
+                  }}
+                  className="flex items-center gap-1 px-2 py-0.5 bg-orange-500/20 hover:bg-orange-500/30 border border-orange-500/70 text-orange-100 rounded text-[10px] font-semibold transition cursor-pointer"
+                  title="Review issues and choose whether to run the iterative autofix loop"
+                >
+                  <Wrench className="w-3 h-3 text-orange-400" />
+                  <span>Offer Autofix...</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => setIsFindingsCollapsed((prev) => !prev)}

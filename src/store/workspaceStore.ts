@@ -15,12 +15,33 @@ import {
   type FileBlockData,
   type TextBlockData,
   type GitHubRepoLink,
+  type AuditTargetType,
+  type TargetAuditReport,
   ConcurrencyConflictError,
 } from '../types/model';
 import { createId } from '../lib/id';
 import { auditPromoteService } from '../lib/auditPromoteService';
 import { runCodeAudit, type CodeAuditResult } from '../lib/codeAudit';
+import { auditTarget } from '../lib/projectAudit';
+import { collectProjectZipManifest } from '../lib/projectZipExport';
 import { computeContentHash } from '../lib/hash';
+import {
+  reconcileAllProjectsFolderState,
+  reconcileProjectFolderState,
+} from '../lib/tetherFolderSync';
+import {
+  buildCategoryApplicationPatch,
+  getProjectCategoryById,
+} from '../lib/projectCategories';
+import {
+  buildAssetTargetPath,
+  getBlockTextAndLanguage,
+  insertImageReferenceIntoCode,
+  sanitizeFolderPath,
+  sanitizeLeafFileName,
+  type ImageReferenceEntry,
+  type MediaCategoryId,
+} from '../lib/imageAssets';
 import {
   loadWorkspaceFromStorage,
   persistProject,
@@ -39,6 +60,8 @@ export interface CreateBlockInput {
   groupId: string;
   kind: BlockKind;
   title: string;
+  sourcePath?: string;
+  projectCategory?: string;
   x?: number;
   y?: number;
   width?: number;
@@ -69,8 +92,32 @@ export interface WorkspaceState {
   isHeaderCollapsed: boolean;
   isInspectorCollapsed: boolean;
   isBlockInspectorCollapsed: boolean;
+  hasLaunchedWorkspace: boolean;
+  lastExitedAt: number | null;
+  isExitConfirmOpen: boolean;
   sandboxes: BlockSandbox[];
   activeSandboxBlockIds: string[];
+  auditModalRequest: {
+    isOpen: boolean;
+    targetType: AuditTargetType;
+    blockId?: string;
+    folderPath?: string;
+    selectedBlockIds?: string[];
+    token: number;
+  } | null;
+  imageModalRequest: {
+    isOpen: boolean;
+    targetCodeBlockId?: string;
+    targetFolder?: string;
+    initialTab?: 'upload' | 'existing';
+    preselectedImageIds?: string[];
+    token: number;
+  } | null;
+  imageFeedback: {
+    message: string;
+    type: 'success' | 'info' | 'error';
+    token: number;
+  } | null;
 
   // Actions
   initStorage: () => Promise<void>;
@@ -82,6 +129,17 @@ export interface WorkspaceState {
   renameGroup: (id: string, name: string) => Promise<void>;
   deleteGroup: (id: string) => Promise<void>;
   createBlock: (input: CreateBlockInput) => Promise<Block>;
+  createBlockFromCategory: (
+    projectId: string,
+    groupId: string,
+    categoryId: string,
+    coords?: { x?: number; y?: number }
+  ) => Promise<Block | null>;
+  applyBlockProjectCategory: (
+    blockId: string,
+    categoryId: string,
+    options?: { applyTemplateIfNonEmpty?: boolean }
+  ) => Promise<Block | null>;
   updateBlock: (id: string, patch: Partial<Omit<Block, 'id' | 'data'>>) => Promise<void>;
   batchUpdateBlocks: (
     updates: Array<{ id: string; patch: Partial<Omit<Block, 'id' | 'data'>> }>
@@ -113,11 +171,77 @@ export interface WorkspaceState {
   toggleInspector: () => void;
   toggleBlockInspector: () => void;
   setBlockInspectorCollapsed: (collapsed: boolean) => void;
+  enterWorkspace: (projectId?: string) => void;
+  openExitConfirm: () => void;
+  closeExitConfirm: () => void;
+  exitWorkspaceGracefully: () => void;
   saveCodeDraft: (blockId: string, newContent: string) => Promise<void>;
   createCodeSnapshot: (blockId: string, label: string) => Promise<void>;
   rollbackCodeRevision: (blockId: string, revisionId: string) => Promise<void>;
   copyBlockForEdit: (sourceBlockId: string, options?: { openEditor?: boolean }) => Promise<Block | null>;
   auditBlock: (blockId: string, contentOverride?: string) => Promise<CodeAuditResult>;
+  auditTargetScope: (params: {
+    targetType: AuditTargetType;
+    projectId?: string;
+    blockId?: string;
+    folderPath?: string;
+    selectedBlockIds?: string[];
+    includeUntethered?: boolean;
+  }) => Promise<TargetAuditReport>;
+  applyAuditedBlockContent: (blockId: string, newContent: string) => Promise<void>;
+  openAuditModal: (req: {
+    targetType: AuditTargetType;
+    blockId?: string;
+    folderPath?: string;
+    selectedBlockIds?: string[];
+  }) => void;
+  closeAuditModal: () => void;
+  openImageModal: (req?: {
+    targetCodeBlockId?: string;
+    targetFolder?: string;
+    initialTab?: 'upload' | 'existing';
+    preselectedImageIds?: string[];
+  }) => void;
+  closeImageModal: () => void;
+  setImageFeedback: (message: string, type?: 'success' | 'info' | 'error') => void;
+  clearImageFeedback: () => void;
+  addImageAssetsToProject: (params: {
+    projectId: string;
+    groupId: string;
+    items: Array<{
+      fileName: string;
+      mimeType: string;
+      size: number;
+      binary: boolean;
+      dataUrl?: string;
+      content?: string;
+      mediaCategory?: MediaCategoryId;
+      folderPath?: string;
+    }>;
+    defaultMediaCategory?: MediaCategoryId;
+    defaultFolderPath?: string;
+    attachToBlockId?: string;
+    insertCodeReference?: boolean;
+  }) => Promise<{
+    createdBlocks: Block[];
+    insertedSnippet?: string;
+    targetBlockId?: string;
+  }>;
+  attachExistingImagesToBlock: (params: {
+    targetCodeBlockId: string;
+    imageBlockIds: string[];
+    role: MediaCategoryId;
+    folderOverride?: string;
+    insertCodeReference?: boolean;
+  }) => Promise<{
+    attachedCount: number;
+    insertedSnippet?: string;
+  }>;
+  moveOrRenameAssetBlock: (
+    blockId: string,
+    nextPath: string,
+    nextCategoryId?: string
+  ) => Promise<Block | null>;
   snipOldBlock: (newBlockId: string) => Promise<{ success: boolean; error?: string; transferredTetherCount: number }>;
   createSandbox: (sourceBlockId: string) => Promise<BlockSandbox>;
   updateSandbox: (
@@ -215,8 +339,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   isHeaderCollapsed: false,
   isInspectorCollapsed: true,
   isBlockInspectorCollapsed: false,
+  hasLaunchedWorkspace: false,
+  lastExitedAt: null,
+  isExitConfirmOpen: false,
   sandboxes: [],
   activeSandboxBlockIds: [],
+  auditModalRequest: null,
+  imageModalRequest: null,
+  imageFeedback: null,
 
   initStorage: async () => {
     if (get().isInitialized) return;
@@ -399,12 +529,36 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           updatedAt: now + 2,
         };
 
-        projects = [p1, p2];
+        const initialReconciled = reconcileAllProjectsFolderState(
+          [p1, p2],
+          [b1, b2, b3, b4, b5, b6],
+          [t1, t2, t3]
+        );
+        projects = initialReconciled.projects;
         groups = [g1, g2, g3];
-        blocks = [b1, b2, b3, b4, b5, b6];
-        tethers = [t1, t2, t3];
+        blocks = initialReconciled.blocks;
+        tethers = initialReconciled.tethers;
 
         await replaceWorkspaceStorage({ projects, groups, blocks, tethers });
+      } else {
+        const reconciled = reconcileAllProjectsFolderState(projects, blocks, tethers);
+        projects = reconciled.projects;
+        blocks = reconciled.blocks;
+        tethers = reconciled.tethers;
+
+        if (
+          reconciled.changedProjectIds.length > 0 ||
+          reconciled.changedBlockIds.length > 0 ||
+          reconciled.removedTetherIds.length > 0
+        ) {
+          const dirtyProjects = projects.filter((p) => reconciled.changedProjectIds.includes(p.id));
+          const dirtyBlocks = blocks.filter((b) => reconciled.changedBlockIds.includes(b.id));
+          await Promise.all([
+            ...dirtyProjects.map((p) => persistProject(p)),
+            ...dirtyBlocks.map((b) => persistBlock(b)),
+            ...reconciled.removedTetherIds.map((tid) => removeTetherFromStorage(tid)),
+          ]);
+        }
       }
 
       // Restore active project and group from localStorage if available
@@ -569,12 +723,36 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   deleteGroup: async (id: string) => {
+    let dirtyProjects: Project[] = [];
+
     set((state) => {
+      const targetGroup = state.groups.find((g) => g.id === id);
       const remainingGroups = state.groups.filter((g) => g.id !== id);
+      const remainingBlocks = state.blocks.filter((b) => b.groupId !== id);
+      const remainingTethers = state.tethers.filter((t) => t.groupId !== id);
+
+      let nextProjects = state.projects;
+      let nextBlocks = remainingBlocks;
+      let nextTethers = remainingTethers;
+
+      if (targetGroup) {
+        const reconciled = reconcileProjectFolderState(
+          state.projects,
+          remainingBlocks,
+          remainingTethers,
+          targetGroup.projectId
+        );
+        nextProjects = reconciled.projects;
+        nextBlocks = reconciled.blocks;
+        nextTethers = reconciled.tethers;
+        dirtyProjects = nextProjects.filter((p) => reconciled.changedProjectIds.includes(p.id));
+      }
+
       return {
+        projects: nextProjects,
         groups: remainingGroups,
-        blocks: state.blocks.filter((b) => b.groupId !== id),
-        tethers: state.tethers.filter((t) => t.groupId !== id),
+        blocks: nextBlocks,
+        tethers: nextTethers,
         activeGroupId:
           state.activeGroupId === id
             ? remainingGroups.find((g) => g.projectId === state.activeProjectId)?.id || null
@@ -587,23 +765,38 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       };
     });
 
-    await removeGroupFromStorage(id);
+    await Promise.all([
+      removeGroupFromStorage(id),
+      ...dirtyProjects.map((p) => persistProject(p)),
+    ]);
   },
 
   createBlock: async (input: CreateBlockInput) => {
     const now = Date.now();
+    const resolvedData = getDefaultBlockData(input.kind, input.data as Partial<BlockData>);
+    const cleanTitle = input.title.trim() || 'Untitled Block';
+    const initialPath =
+      (input.sourcePath || (resolvedData as { path?: string })?.path || cleanTitle).replace(
+        /^\/+/,
+        ''
+      ) || cleanTitle;
+
     const newBlock: Block = {
       id: createId(),
       projectId: input.projectId,
       groupId: input.groupId,
       kind: input.kind,
-      title: input.title.trim() || 'Untitled Block',
+      title: cleanTitle,
+      sourcePath: initialPath,
+      originalSourcePath: initialPath,
+      isInFolderStructure: false,
+      projectCategory: input.projectCategory,
       x: input.x ?? 100,
       y: input.y ?? 100,
       width: input.width,
       height: input.height,
       status: input.status ?? 'ready',
-      data: getDefaultBlockData(input.kind, input.data as Partial<BlockData>),
+      data: resolvedData,
       createdAt: now,
       updatedAt: now,
     };
@@ -616,22 +809,194 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return newBlock;
   },
 
+  createBlockFromCategory: async (
+    projectId: string,
+    groupId: string,
+    categoryId: string,
+    coords?: { x?: number; y?: number }
+  ) => {
+    const category = getProjectCategoryById(categoryId);
+    if (!category) return null;
+
+    const existingCount = get().blocks.filter(
+      (b) => b.projectId === projectId && b.groupId === groupId
+    ).length;
+    const x = coords?.x ?? 120 + (existingCount % 3) * 340;
+    const y = coords?.y ?? 80 + Math.floor(existingCount / 3) * 260;
+
+    if (category.preferredKind === 'file') {
+      return get().createBlock({
+        projectId,
+        groupId,
+        kind: 'file',
+        title: category.defaultFileName,
+        sourcePath: category.defaultPath,
+        projectCategory: category.id,
+        x,
+        y,
+        status: 'ready',
+        data: {
+          path: category.defaultPath,
+          mimeType: category.mimeType,
+          size: new TextEncoder().encode(category.template).byteLength,
+          binary: false,
+          content: category.template,
+        },
+      });
+    }
+
+    return get().createBlock({
+      projectId,
+      groupId,
+      kind: 'code',
+      title: category.defaultFileName,
+      sourcePath: category.defaultPath,
+      projectCategory: category.id,
+      x,
+      y,
+      status: 'ready',
+      data: {
+        path: category.defaultPath,
+        language: category.language,
+        currentContent: category.template,
+        revisions: [],
+      },
+    });
+  },
+
+  applyBlockProjectCategory: async (
+    blockId: string,
+    categoryId: string,
+    options?: { applyTemplateIfNonEmpty?: boolean }
+  ) => {
+    let updatedResult: Block | null = null;
+    let dirtyBlocks: Block[] = [];
+    let dirtyProjects: Project[] = [];
+    let removedTetherIds: string[] = [];
+
+    set((s) => {
+      const target = s.blocks.find((b) => b.id === blockId);
+      if (!target) return s;
+
+      const categoryPatch = buildCategoryApplicationPatch(target, categoryId, options);
+      if (!categoryPatch) return s;
+
+      const patchedBlock: Block = {
+        ...target,
+        kind: categoryPatch.kind,
+        title: categoryPatch.title,
+        sourcePath: categoryPatch.sourcePath,
+        originalSourcePath: categoryPatch.originalSourcePath,
+        projectCategory: categoryPatch.projectCategory,
+        data: categoryPatch.data,
+        updatedAt: Date.now(),
+      };
+
+      const mappedBlocks = s.blocks.map((b) => (b.id === blockId ? patchedBlock : b));
+      const reconciled = reconcileProjectFolderState(
+        s.projects,
+        mappedBlocks,
+        s.tethers,
+        target.projectId
+      );
+
+      updatedResult = reconciled.blocks.find((b) => b.id === blockId) || patchedBlock;
+      const dirtyBlockIdSet = new Set([blockId, ...reconciled.changedBlockIds]);
+      dirtyBlocks = reconciled.blocks.filter((b) => dirtyBlockIdSet.has(b.id));
+      dirtyProjects = reconciled.projects.filter((p) => reconciled.changedProjectIds.includes(p.id));
+      removedTetherIds = reconciled.removedTetherIds;
+
+      return {
+        projects: reconciled.projects,
+        blocks: reconciled.blocks,
+        tethers: reconciled.tethers,
+      };
+    });
+
+    if (dirtyBlocks.length > 0 || dirtyProjects.length > 0 || removedTetherIds.length > 0) {
+      await Promise.all([
+        ...dirtyBlocks.map((b) => persistBlock(b)),
+        ...dirtyProjects.map((p) => persistProject(p)),
+        ...removedTetherIds.map((tid) => removeTetherFromStorage(tid)),
+      ]);
+    }
+
+    return updatedResult;
+  },
+
   updateBlock: async (id: string, patch: Partial<Omit<Block, 'id' | 'data'>>) => {
-    const state = get();
-    const targetBlock = state.blocks.find((b) => b.id === id);
-    if (!targetBlock) return;
+    const needsReconcile =
+      patch.title !== undefined ||
+      patch.sourcePath !== undefined ||
+      patch.tetherParentId !== undefined ||
+      patch.projectCategory !== undefined;
 
-    const updated: Block = {
-      ...targetBlock,
-      ...patch,
-      updatedAt: Date.now(),
-    };
+    let dirtyBlocks: Block[] = [];
+    let dirtyProjects: Project[] = [];
+    let removedTetherIds: string[] = [];
 
-    set((s) => ({
-      blocks: s.blocks.map((b) => (b.id === id ? updated : b)),
-    }));
+    set((s) => {
+      const target = s.blocks.find((b) => b.id === id);
+      if (!target) return s;
 
-    await persistBlock(updated);
+      const nextTitle = patch.title !== undefined ? patch.title.trim() || target.title : target.title;
+      let nextOriginalSourcePath = target.originalSourcePath;
+
+      if (patch.sourcePath !== undefined && !target.isInFolderStructure) {
+        nextOriginalSourcePath = patch.sourcePath;
+      } else if (patch.title !== undefined) {
+        const baseOrig = (
+          target.originalSourcePath ||
+          target.sourcePath ||
+          (target.data as { path?: string })?.path ||
+          target.title
+        ).replace(/^\/+/, '');
+        const parts = baseOrig.split('/');
+        nextOriginalSourcePath =
+          parts.length > 1 ? `${parts.slice(0, -1).join('/')}/${nextTitle}` : nextTitle;
+      }
+
+      const nextBlock: Block = {
+        ...target,
+        ...patch,
+        title: nextTitle,
+        originalSourcePath: nextOriginalSourcePath,
+        updatedAt: Date.now(),
+      };
+
+      const mappedBlocks = s.blocks.map((b) => (b.id === id ? nextBlock : b));
+
+      if (!needsReconcile) {
+        dirtyBlocks = [nextBlock];
+        return { blocks: mappedBlocks };
+      }
+
+      const reconciled = reconcileProjectFolderState(
+        s.projects,
+        mappedBlocks,
+        s.tethers,
+        target.projectId
+      );
+
+      const dirtyBlockIdSet = new Set([id, ...reconciled.changedBlockIds]);
+      dirtyBlocks = reconciled.blocks.filter((b) => dirtyBlockIdSet.has(b.id));
+      dirtyProjects = reconciled.projects.filter((p) => reconciled.changedProjectIds.includes(p.id));
+      removedTetherIds = reconciled.removedTetherIds;
+
+      return {
+        projects: reconciled.projects,
+        blocks: reconciled.blocks,
+        tethers: reconciled.tethers,
+      };
+    });
+
+    if (dirtyBlocks.length > 0 || dirtyProjects.length > 0 || removedTetherIds.length > 0) {
+      await Promise.all([
+        ...dirtyBlocks.map((b) => persistBlock(b)),
+        ...dirtyProjects.map((p) => persistProject(p)),
+        ...removedTetherIds.map((tid) => removeTetherFromStorage(tid)),
+      ]);
+    }
   },
 
   batchUpdateBlocks: async (updates) => {
@@ -677,25 +1042,73 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   deleteBlock: async (id: string) => {
-    const state = get();
-    const targetBlock = state.blocks.find((b) => b.id === id);
-    if (!targetBlock) return;
-
-    // Rule: Deleting a block deletes every tether connected to it
-    const connectedTethers = state.tethers.filter(
-      (t) => t.sourceBlockId === id || t.targetBlockId === id
-    );
-    const connectedTetherIds = connectedTethers.map((t) => t.id);
+    let targetProjectId: string | null = null;
+    let connectedTetherIds: string[] = [];
+    let dirtyBlocks: Block[] = [];
+    let dirtyProjects: Project[] = [];
+    let extraRemovedTetherIds: string[] = [];
 
     set((s) => {
+      const targetBlock = s.blocks.find((b) => b.id === id);
+      if (!targetBlock) return s;
+
+      targetProjectId = targetBlock.projectId;
+      connectedTetherIds = s.tethers
+        .filter((t) => t.sourceBlockId === id || t.targetBlockId === id)
+        .map((t) => t.id);
+
+      const remainingBlocks = s.blocks
+        .filter((b) => b.id !== id)
+        .map((b) => {
+          let changed = false;
+          let next = b;
+          if (b.copiedFromBlockId === id) {
+            next = { ...next, copiedFromBlockId: undefined };
+            changed = true;
+          }
+          if (b.kind === 'upload') {
+            const uData = b.data as UploadBlockData;
+            if (uData.extractedBlockIds?.includes(id)) {
+              next = {
+                ...next,
+                data: {
+                  ...uData,
+                  extractedBlockIds: uData.extractedBlockIds.filter((eid) => eid !== id),
+                },
+              };
+              changed = true;
+            }
+          }
+          return changed ? next : b;
+        });
+
+      const remainingTethers = s.tethers.filter(
+        (t) => t.sourceBlockId !== id && t.targetBlockId !== id
+      );
+
+      const reconciled = reconcileProjectFolderState(
+        s.projects,
+        remainingBlocks,
+        remainingTethers,
+        targetBlock.projectId
+      );
+
+      dirtyBlocks = reconciled.blocks.filter((b) => reconciled.changedBlockIds.includes(b.id));
+      dirtyProjects = reconciled.projects.filter((p) => reconciled.changedProjectIds.includes(p.id));
+      extraRemovedTetherIds = reconciled.removedTetherIds;
+
       const nextOpen = s.openBlockIds.filter((tabId) => tabId !== id);
-      const nextActive = s.activeEditorBlockId === id
-        ? (nextOpen.length > 0 ? nextOpen[nextOpen.length - 1] : null)
-        : s.activeEditorBlockId;
+      const nextActive =
+        s.activeEditorBlockId === id
+          ? nextOpen.length > 0
+            ? nextOpen[nextOpen.length - 1]
+            : null
+          : s.activeEditorBlockId;
 
       return {
-        blocks: s.blocks.filter((b) => b.id !== id),
-        tethers: s.tethers.filter((t) => t.sourceBlockId !== id && t.targetBlockId !== id),
+        projects: reconciled.projects,
+        blocks: reconciled.blocks,
+        tethers: reconciled.tethers,
         selectedBlockId: s.selectedBlockId === id ? null : s.selectedBlockId,
         focusedBlockId: s.focusedBlockId === id ? null : s.focusedBlockId,
         openBlockIds: nextOpen,
@@ -703,7 +1116,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       };
     });
 
-    await removeBlockFromStorage(id, connectedTetherIds);
+    if (!targetProjectId) return;
+
+    await Promise.all([
+      removeBlockFromStorage(id, connectedTetherIds),
+      ...dirtyBlocks.map((b) => persistBlock(b)),
+      ...dirtyProjects.map((p) => persistProject(p)),
+      ...extraRemovedTetherIds.map((tid) => removeTetherFromStorage(tid)),
+    ]);
   },
 
   createTether: async (
@@ -711,67 +1131,131 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     targetBlockId: string,
     label?: string
   ): Promise<Tether | null> => {
-    // Rule: Prevent self-tethers
     if (sourceBlockId === targetBlockId) {
       return null;
     }
 
-    const state = get();
-    const sourceBlock = state.blocks.find((b) => b.id === sourceBlockId);
-    const targetBlock = state.blocks.find((b) => b.id === targetBlockId);
+    let createdTether: Tether | null = null;
+    let dirtyBlocks: Block[] = [];
+    let dirtyProjects: Project[] = [];
+    let removedTetherIds: string[] = [];
 
-    if (!sourceBlock || !targetBlock) {
+    set((s) => {
+      const sourceBlock = s.blocks.find((b) => b.id === sourceBlockId);
+      const targetBlock = s.blocks.find((b) => b.id === targetBlockId);
+
+      if (!sourceBlock || !targetBlock) {
+        return s;
+      }
+
+      if (
+        sourceBlock.projectId !== targetBlock.projectId ||
+        sourceBlock.groupId !== targetBlock.groupId
+      ) {
+        return s;
+      }
+
+      const duplicateExists = s.tethers.some(
+        (t) =>
+          t.projectId === sourceBlock.projectId &&
+          t.groupId === sourceBlock.groupId &&
+          ((t.sourceBlockId === sourceBlockId && t.targetBlockId === targetBlockId) ||
+            (t.sourceBlockId === targetBlockId && t.targetBlockId === sourceBlockId))
+      );
+
+      if (duplicateExists) {
+        return s;
+      }
+
+      const newTether: Tether = {
+        id: createId(),
+        projectId: sourceBlock.projectId,
+        groupId: sourceBlock.groupId,
+        sourceBlockId,
+        targetBlockId,
+        label: label?.trim() || undefined,
+        createdAt: Date.now(),
+      };
+      createdTether = newTether;
+
+      const nextTethers = [...s.tethers, newTether];
+      const reconciled = reconcileProjectFolderState(
+        s.projects,
+        s.blocks,
+        nextTethers,
+        sourceBlock.projectId
+      );
+
+      dirtyBlocks = reconciled.blocks.filter((b) => reconciled.changedBlockIds.includes(b.id));
+      dirtyProjects = reconciled.projects.filter((p) => reconciled.changedProjectIds.includes(p.id));
+      removedTetherIds = reconciled.removedTetherIds;
+
+      return {
+        projects: reconciled.projects,
+        blocks: reconciled.blocks,
+        tethers: reconciled.tethers,
+      };
+    });
+
+    if (!createdTether) {
       return null;
     }
 
-    // Rule: A tether may connect only two blocks in the same project and same tether group
-    if (sourceBlock.projectId !== targetBlock.projectId) {
-      return null;
-    }
-    if (sourceBlock.groupId !== targetBlock.groupId) {
-      return null;
-    }
+    await Promise.all([
+      persistTether(createdTether),
+      ...dirtyBlocks.map((b) => persistBlock(b)),
+      ...dirtyProjects.map((p) => persistProject(p)),
+      ...removedTetherIds.map((tid) => removeTetherFromStorage(tid)),
+    ]);
 
-    // Rule: Prevent duplicate bidirectional tethers
-    const duplicateExists = state.tethers.some(
-      (t) =>
-        t.projectId === sourceBlock.projectId &&
-        t.groupId === sourceBlock.groupId &&
-        ((t.sourceBlockId === sourceBlockId && t.targetBlockId === targetBlockId) ||
-          (t.sourceBlockId === targetBlockId && t.targetBlockId === sourceBlockId))
-    );
-
-    if (duplicateExists) {
-      return null;
-    }
-
-    const newTether: Tether = {
-      id: createId(),
-      projectId: sourceBlock.projectId,
-      groupId: sourceBlock.groupId,
-      sourceBlockId,
-      targetBlockId,
-      label: label?.trim() || undefined,
-      createdAt: Date.now(),
-    };
-
-    set((s) => ({
-      tethers: [...s.tethers, newTether],
-    }));
-
-    await persistTether(newTether);
-    return newTether;
+    return createdTether;
   },
 
   deleteTether: async (id: string) => {
-    set((state) => ({
-      tethers: state.tethers.filter((t) => t.id !== id),
-    }));
-    await removeTetherFromStorage(id);
+    let foundTether = false;
+    let dirtyBlocks: Block[] = [];
+    let dirtyProjects: Project[] = [];
+    let extraRemovedTetherIds: string[] = [];
+
+    set((s) => {
+      const targetTether = s.tethers.find((t) => t.id === id);
+      if (!targetTether) {
+        return s;
+      }
+      foundTether = true;
+
+      const remainingTethers = s.tethers.filter((t) => t.id !== id);
+      const reconciled = reconcileProjectFolderState(
+        s.projects,
+        s.blocks,
+        remainingTethers,
+        targetTether.projectId
+      );
+
+      dirtyBlocks = reconciled.blocks.filter((b) => reconciled.changedBlockIds.includes(b.id));
+      dirtyProjects = reconciled.projects.filter((p) => reconciled.changedProjectIds.includes(p.id));
+      extraRemovedTetherIds = reconciled.removedTetherIds;
+
+      return {
+        projects: reconciled.projects,
+        blocks: reconciled.blocks,
+        tethers: reconciled.tethers,
+      };
+    });
+
+    if (!foundTether) return;
+
+    await Promise.all([
+      removeTetherFromStorage(id),
+      ...dirtyBlocks.map((b) => persistBlock(b)),
+      ...dirtyProjects.map((p) => persistProject(p)),
+      ...extraRemovedTetherIds.map((tid) => removeTetherFromStorage(tid)),
+    ]);
   },
 
   setActiveProject: (projectId: string | null) => {
     set((state) => {
+      const isProjectChanged = projectId !== state.activeProjectId;
       const projectGroups = state.groups.filter((g) => g.projectId === projectId);
       const nextGroupId = projectGroups.length > 0 ? projectGroups[0].id : null;
       if (typeof window !== 'undefined') {
@@ -787,6 +1271,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         focusedBlockId: null,
         connectingSourceBlockId: null,
         activeSandboxBlockIds: [],
+        ...(isProjectChanged
+          ? {
+              isEditorOpen: false,
+              openBlockIds: [],
+              activeEditorBlockId: null,
+            }
+          : {}),
       };
     });
 
@@ -1004,6 +1495,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (!block || block.kind !== 'code') return;
     const codeData = block.data as { currentContent: string; revisions: { id: string; createdAt: number; content: string; label?: string }[] };
 
+    if (newContent === codeData.currentContent) {
+      return;
+    }
+
     const beforeEditRevision = {
       id: createId(),
       createdAt: Date.now(),
@@ -1011,7 +1506,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       label: 'before edit',
     };
 
-    const updatedRevisions = [...(codeData.revisions || []), beforeEditRevision].slice(-50);
+    const updatedRevisions = [...(codeData.revisions || []), beforeEditRevision].slice(-15);
 
     await get().updateBlockData(blockId, {
       currentContent: newContent,
@@ -1031,7 +1526,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       label: label.trim() || 'snapshot',
     };
 
-    const updatedRevisions = [...(codeData.revisions || []), snapshotRevision].slice(-50);
+    const updatedRevisions = [...(codeData.revisions || []), snapshotRevision].slice(-15);
 
     await get().updateBlockData(blockId, {
       revisions: updatedRevisions,
@@ -1052,7 +1547,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       label: 'before rollback',
     };
 
-    const updatedRevisions = [...codeData.revisions, beforeRollbackRevision].slice(-50);
+    const updatedRevisions = [...codeData.revisions, beforeRollbackRevision].slice(-15);
 
     await get().updateBlockData(blockId, {
       currentContent: targetRev.content,
@@ -1101,6 +1596,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
     await get().updateBlock(newBlock.id, {
       sourcePath: dupPath,
+      originalSourcePath: dupPath,
       copiedFromBlockId: source.id,
       lastAuditStatus: 'unverified',
       lastAuditFindings: [],
@@ -1172,7 +1668,44 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         ? (block.data as CodeBlockData)?.language || ext || 'javascript'
         : ext || (block.kind === 'text' ? 'markdown' : 'javascript');
 
-    const result = runCodeAudit({ content, language, path });
+    const project = get().projects.find((p) => p.id === block.projectId);
+    let projectContext: { allPaths: string[]; declaredDependencies?: string[] } | undefined;
+    if (project) {
+      const manifest = collectProjectZipManifest(project, get().blocks, {
+        includeUntethered: true,
+      });
+      const pkgEntry = manifest.files.find(
+        (f) => f.encoding === 'utf-8' && f.path.toLowerCase().split('/').pop() === 'package.json'
+      );
+      let declaredDependencies: string[] | undefined;
+      if (pkgEntry) {
+        try {
+          const parsed = JSON.parse(pkgEntry.content) as Record<string, unknown>;
+          const deps = new Set<string>();
+          for (const key of ['dependencies', 'devDependencies', 'peerDependencies']) {
+            const sec = parsed[key];
+            if (sec && typeof sec === 'object' && !Array.isArray(sec)) {
+              for (const dep of Object.keys(sec as Record<string, unknown>)) deps.add(dep);
+            }
+          }
+          declaredDependencies = Array.from(deps);
+        } catch {
+          declaredDependencies = undefined;
+        }
+      }
+      projectContext = {
+        allPaths: manifest.files.map((f) => f.path),
+        declaredDependencies,
+      };
+    }
+
+    const result = runCodeAudit({
+      content,
+      language,
+      path,
+      blockId: block.id,
+      projectContext,
+    });
 
     let auditRunId: string | undefined;
     try {
@@ -1210,6 +1743,408 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     });
 
     return result;
+  },
+
+  auditTargetScope: async ({
+    targetType,
+    projectId,
+    blockId,
+    folderPath,
+    selectedBlockIds,
+    includeUntethered = true,
+  }) => {
+    const state = get();
+    const resolvedProjectId = projectId || state.activeProjectId;
+    const project = state.projects.find((p) => p.id === resolvedProjectId);
+    if (!project) {
+      throw new Error('No active project available to audit.');
+    }
+
+    const report = auditTarget({
+      targetType,
+      project,
+      blocks: state.blocks,
+      blockId,
+      folderPath,
+      selectedBlockIds,
+      includeUntethered,
+    });
+
+    // Sync block audit metadata & statuses atomically
+    if (report.fileReports.length > 0) {
+      const updates = report.fileReports.map((fr) => ({
+        id: fr.blockId,
+        patch: {
+          lastAuditStatus: (fr.passed ? 'passed' : 'failed') as 'passed' | 'failed',
+          lastAuditHash: fr.contentHash,
+          lastAuditFindings: fr.findings,
+          status: (fr.passed ? 'ready' : 'error') as BlockStatus,
+        },
+      }));
+      await get().batchUpdateBlocks(updates);
+    }
+
+    return report;
+  },
+
+  applyAuditedBlockContent: async (blockId: string, newContent: string) => {
+    const block = get().blocks.find((b) => b.id === blockId);
+    if (!block) return;
+
+    const byteSize = new TextEncoder().encode(newContent).byteLength;
+    if (block.kind === 'code') {
+      await get().updateBlockData(block.id, { currentContent: newContent });
+    } else if (block.kind === 'text') {
+      await get().updateBlockData(block.id, { content: newContent });
+    } else if (block.kind === 'file') {
+      await get().updateBlockData(block.id, { content: newContent, size: byteSize });
+    }
+
+    await get().auditBlock(block.id, newContent);
+  },
+
+  openAuditModal: (req) => {
+    set({
+      auditModalRequest: {
+        isOpen: true,
+        targetType: req.targetType,
+        blockId: req.blockId,
+        folderPath: req.folderPath,
+        selectedBlockIds: req.selectedBlockIds,
+        token: Date.now(),
+      },
+    });
+  },
+
+  closeAuditModal: () => {
+    set({ auditModalRequest: null });
+  },
+
+  openImageModal: (req) => {
+    set({
+      imageModalRequest: {
+        isOpen: true,
+        targetCodeBlockId: req?.targetCodeBlockId,
+        targetFolder: req?.targetFolder,
+        initialTab: req?.initialTab ?? 'upload',
+        preselectedImageIds: req?.preselectedImageIds,
+        token: Date.now(),
+      },
+    });
+  },
+
+  closeImageModal: () => {
+    set({ imageModalRequest: null });
+  },
+
+  setImageFeedback: (message, type = 'success') => {
+    set({
+      imageFeedback: {
+        message,
+        type,
+        token: Date.now(),
+      },
+    });
+  },
+
+  clearImageFeedback: () => {
+    set({ imageFeedback: null });
+  },
+
+  addImageAssetsToProject: async ({
+    projectId,
+    groupId,
+    items,
+    defaultMediaCategory = 'media-asset',
+    defaultFolderPath,
+    attachToBlockId,
+    insertCodeReference = true,
+  }) => {
+    if (items.length === 0) {
+      return { createdBlocks: [] };
+    }
+
+    const state = get();
+    const projectBlocks = state.blocks.filter((b) => b.projectId === projectId);
+    const usedPaths = new Set(
+      projectBlocks.map((b) =>
+        (b.sourcePath || (b.data as { path?: string } | undefined)?.path || b.title)
+          .replace(/^\/+/, '')
+          .toLowerCase()
+      )
+    );
+
+    const anchorBlock = attachToBlockId
+      ? state.blocks.find((b) => b.id === attachToBlockId)
+      : undefined;
+    const groupCount = projectBlocks.filter((b) => b.groupId === groupId).length;
+
+    const createdBlocks: Block[] = [];
+    const imageEntries: ImageReferenceEntry[] = [];
+
+    for (let idx = 0; idx < items.length; idx++) {
+      const item = items[idx];
+      const role = item.mediaCategory || defaultMediaCategory;
+      const folder = sanitizeFolderPath(
+        item.folderPath !== undefined
+          ? item.folderPath
+          : defaultFolderPath !== undefined
+          ? defaultFolderPath
+          : 'assets/images'
+      );
+
+      let candidateLeaf = sanitizeLeafFileName(item.fileName);
+      let fullPath = buildAssetTargetPath(candidateLeaf, folder);
+      if (usedPaths.has(fullPath.toLowerCase())) {
+        const dotIdx = candidateLeaf.lastIndexOf('.');
+        const stem = dotIdx > 0 ? candidateLeaf.slice(0, dotIdx) : candidateLeaf;
+        const ext = dotIdx > 0 ? candidateLeaf.slice(dotIdx) : '';
+        let counter = 2;
+        while (usedPaths.has(fullPath.toLowerCase())) {
+          candidateLeaf = `${stem}-${counter}${ext}`;
+          fullPath = buildAssetTargetPath(candidateLeaf, folder);
+          counter++;
+        }
+      }
+      usedPaths.add(fullPath.toLowerCase());
+
+      const baseX = anchorBlock ? anchorBlock.x + 360 : 120 + ((groupCount + idx) % 3) * 340;
+      const baseY = anchorBlock
+        ? anchorBlock.y + idx * 80
+        : 80 + Math.floor((groupCount + idx) / 3) * 240;
+
+      const created = await get().createBlock({
+        projectId,
+        groupId,
+        kind: 'file',
+        title: candidateLeaf,
+        sourcePath: fullPath,
+        projectCategory: role,
+        x: Math.round(baseX),
+        y: Math.round(baseY),
+        status: 'ready',
+        data: {
+          path: fullPath,
+          mimeType: item.mimeType,
+          size: item.size,
+          binary: item.binary,
+          dataUrl: item.binary ? item.dataUrl : undefined,
+          content: item.binary ? undefined : item.content || '',
+        },
+      });
+
+      createdBlocks.push(created);
+      imageEntries.push({
+        path: fullPath,
+        title: candidateLeaf,
+        mimeType: item.mimeType,
+      });
+
+      if (anchorBlock && anchorBlock.projectId === projectId && anchorBlock.groupId === groupId) {
+        await get().createTether(anchorBlock.id, created.id, 'asset');
+      }
+    }
+
+    let insertedSnippet: string | undefined;
+    if (anchorBlock && insertCodeReference && imageEntries.length > 0) {
+      const { content, language, path } = getBlockTextAndLanguage(anchorBlock);
+      const { nextCode, snippet } = insertImageReferenceIntoCode({
+        code: content,
+        language,
+        targetFilePath: path,
+        imageEntries,
+        role: defaultMediaCategory,
+      });
+      if (snippet && nextCode !== content) {
+        if (anchorBlock.kind === 'code') {
+          await get().saveCodeDraft(anchorBlock.id, nextCode);
+        } else {
+          const byteSize = new TextEncoder().encode(nextCode).byteLength;
+          await get().updateBlockData(anchorBlock.id, { content: nextCode, size: byteSize });
+        }
+        insertedSnippet = snippet;
+      }
+    }
+
+    const lastCreated = createdBlocks[createdBlocks.length - 1];
+    if (lastCreated) {
+      get().selectBlock(anchorBlock ? anchorBlock.id : lastCreated.id);
+    }
+
+    return {
+      createdBlocks,
+      insertedSnippet,
+      targetBlockId: anchorBlock?.id,
+    };
+  },
+
+  attachExistingImagesToBlock: async ({
+    targetCodeBlockId,
+    imageBlockIds,
+    role,
+    folderOverride,
+    insertCodeReference = true,
+  }) => {
+    const state = get();
+    const targetBlock = state.blocks.find((b) => b.id === targetCodeBlockId);
+    if (!targetBlock || imageBlockIds.length === 0) {
+      return { attachedCount: 0 };
+    }
+
+    const imageEntries: ImageReferenceEntry[] = [];
+    let attachedCount = 0;
+
+    for (const imgId of imageBlockIds) {
+      let imgBlock = get().blocks.find((b) => b.id === imgId);
+      if (!imgBlock) continue;
+
+      const currentPath = (
+        imgBlock.sourcePath ||
+        (imgBlock.data as FileBlockData | undefined)?.path ||
+        imgBlock.title
+      ).replace(/^\/+/, '');
+      const leaf = sanitizeLeafFileName(imgBlock.title, currentPath);
+
+      if (folderOverride !== undefined) {
+        const nextPath = buildAssetTargetPath(leaf, folderOverride);
+        if (nextPath !== currentPath || imgBlock.projectCategory !== role) {
+          const moved = await get().moveOrRenameAssetBlock(imgBlock.id, nextPath, role);
+          if (moved) imgBlock = moved;
+        }
+      } else if (imgBlock.projectCategory !== role) {
+        await get().updateBlock(imgBlock.id, { projectCategory: role });
+        imgBlock = get().blocks.find((b) => b.id === imgBlock!.id) || imgBlock;
+      }
+
+      if (
+        imgBlock.projectId === targetBlock.projectId &&
+        imgBlock.groupId === targetBlock.groupId &&
+        imgBlock.id !== targetBlock.id
+      ) {
+        await get().createTether(targetBlock.id, imgBlock.id, 'asset');
+      }
+
+      const finalPath = (
+        imgBlock.sourcePath ||
+        (imgBlock.data as FileBlockData | undefined)?.path ||
+        imgBlock.title
+      ).replace(/^\/+/, '');
+
+      imageEntries.push({
+        path: finalPath,
+        title: imgBlock.title,
+        mimeType: (imgBlock.data as FileBlockData | undefined)?.mimeType,
+      });
+      attachedCount++;
+    }
+
+    let insertedSnippet: string | undefined;
+    if (insertCodeReference && imageEntries.length > 0) {
+      const latestTarget = get().blocks.find((b) => b.id === targetBlock.id) || targetBlock;
+      const { content, language, path } = getBlockTextAndLanguage(latestTarget);
+      const { nextCode, snippet } = insertImageReferenceIntoCode({
+        code: content,
+        language,
+        targetFilePath: path,
+        imageEntries,
+        role,
+      });
+      if (snippet && nextCode !== content) {
+        if (latestTarget.kind === 'code') {
+          await get().saveCodeDraft(latestTarget.id, nextCode);
+        } else {
+          const byteSize = new TextEncoder().encode(nextCode).byteLength;
+          await get().updateBlockData(latestTarget.id, { content: nextCode, size: byteSize });
+        }
+        insertedSnippet = snippet;
+      }
+    }
+
+    return { attachedCount, insertedSnippet };
+  },
+
+  moveOrRenameAssetBlock: async (
+    blockId: string,
+    nextPath: string,
+    nextCategoryId?: string
+  ) => {
+    const cleanPath = nextPath
+      .replace(/\\/g, '/')
+      .split('/')
+      .map((s) => s.trim())
+      .filter((s) => s && s !== '.' && s !== '..')
+      .join('/');
+    if (!cleanPath) return null;
+
+    const leafTitle = cleanPath.split('/').pop() || cleanPath;
+    let updatedResult: Block | null = null;
+    let dirtyBlocks: Block[] = [];
+    let dirtyProjects: Project[] = [];
+    let removedTetherIds: string[] = [];
+
+    set((s) => {
+      const target = s.blocks.find((b) => b.id === blockId);
+      if (!target) return s;
+
+      let nextData = target.data;
+      if (target.kind === 'file') {
+        const fData = target.data as FileBlockData;
+        nextData = {
+          ...fData,
+          path: cleanPath,
+          parentFolderPath: undefined,
+        };
+      } else if (target.kind === 'code') {
+        const cData = target.data as CodeBlockData;
+        nextData = {
+          ...cData,
+          path: cleanPath,
+        };
+      }
+
+      const patched: Block = {
+        ...target,
+        title: leafTitle,
+        sourcePath: cleanPath,
+        originalSourcePath: cleanPath,
+        projectCategory:
+          nextCategoryId !== undefined ? nextCategoryId || undefined : target.projectCategory,
+        data: nextData,
+        updatedAt: Date.now(),
+      };
+
+      const mapped = s.blocks.map((b) => (b.id === blockId ? patched : b));
+      const reconciled = reconcileProjectFolderState(
+        s.projects,
+        mapped,
+        s.tethers,
+        target.projectId
+      );
+
+      updatedResult = reconciled.blocks.find((b) => b.id === blockId) || patched;
+      const dirtyIdSet = new Set([blockId, ...reconciled.changedBlockIds]);
+      dirtyBlocks = reconciled.blocks.filter((b) => dirtyIdSet.has(b.id));
+      dirtyProjects = reconciled.projects.filter((p) =>
+        reconciled.changedProjectIds.includes(p.id)
+      );
+      removedTetherIds = reconciled.removedTetherIds;
+
+      return {
+        projects: reconciled.projects,
+        blocks: reconciled.blocks,
+        tethers: reconciled.tethers,
+      };
+    });
+
+    if (dirtyBlocks.length > 0 || dirtyProjects.length > 0 || removedTetherIds.length > 0) {
+      await Promise.all([
+        ...dirtyBlocks.map((b) => persistBlock(b)),
+        ...dirtyProjects.map((p) => persistProject(p)),
+        ...removedTetherIds.map((tid) => removeTetherFromStorage(tid)),
+      ]);
+    }
+
+    return updatedResult;
   },
 
   snipOldBlock: async (newBlockId: string) => {
@@ -1336,6 +2271,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       x: oldBlock.x,
       y: oldBlock.y,
       sourcePath: preservedPath,
+      originalSourcePath: preservedPath,
       copiedFromBlockId: undefined,
       status: 'ready',
     });
@@ -1532,11 +2468,23 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   importWorkspace: async (data) => {
-    await replaceWorkspaceStorage(data);
+    const reconciled = reconcileAllProjectsFolderState(
+      data.projects,
+      data.blocks,
+      data.tethers
+    );
+    const cleanedData = {
+      projects: reconciled.projects,
+      groups: data.groups,
+      blocks: reconciled.blocks,
+      tethers: reconciled.tethers,
+    };
 
-    const firstProject = data.projects[0] || null;
+    await replaceWorkspaceStorage(cleanedData);
+
+    const firstProject = cleanedData.projects[0] || null;
     const firstGroup = firstProject
-      ? data.groups.find((g) => g.projectId === firstProject.id) || null
+      ? cleanedData.groups.find((g) => g.projectId === firstProject.id) || null
       : null;
 
     if (typeof window !== 'undefined') {
@@ -1547,16 +2495,66 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
 
     set({
-      projects: data.projects,
-      groups: data.groups,
-      blocks: data.blocks,
-      tethers: data.tethers,
+      projects: cleanedData.projects,
+      groups: cleanedData.groups,
+      blocks: cleanedData.blocks,
+      tethers: cleanedData.tethers,
       activeProjectId: firstProject ? firstProject.id : null,
       activeGroupId: firstGroup ? firstGroup.id : null,
       selectedBlockId: null,
       focusedBlockId: null,
       connectingSourceBlockId: null,
       searchQuery: '',
+      isEditorOpen: false,
+      openBlockIds: [],
+      activeEditorBlockId: null,
     });
   },
+
+  enterWorkspace: (projectId?: string) => {
+    const state = get();
+    if (projectId && projectId !== state.activeProjectId) {
+      const targetProject = state.projects.find((p) => p.id === projectId);
+      if (targetProject) {
+        const projectGroups = state.groups.filter((g) => g.projectId === targetProject.id);
+        const firstGroup = projectGroups[0] || null;
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('tether:activeProjectId', targetProject.id);
+          if (firstGroup) localStorage.setItem('tether:activeGroupId', firstGroup.id);
+          else localStorage.removeItem('tether:activeGroupId');
+        }
+        set({
+          activeProjectId: targetProject.id,
+          activeGroupId: firstGroup ? firstGroup.id : null,
+          selectedBlockId: null,
+          focusedBlockId: null,
+          hasLaunchedWorkspace: true,
+          lastExitedAt: null,
+          isExitConfirmOpen: false,
+        });
+        return;
+      }
+    }
+    set({
+      hasLaunchedWorkspace: true,
+      lastExitedAt: null,
+      isExitConfirmOpen: false,
+    });
+  },
+
+  openExitConfirm: () => set({ isExitConfirmOpen: true }),
+
+  closeExitConfirm: () => set({ isExitConfirmOpen: false }),
+
+  exitWorkspaceGracefully: () =>
+    set({
+      hasLaunchedWorkspace: false,
+      lastExitedAt: Date.now(),
+      isExitConfirmOpen: false,
+      isEditorOpen: false,
+      focusedBlockId: null,
+      connectingSourceBlockId: null,
+      auditModalRequest: null,
+      imageModalRequest: null,
+    }),
 }));

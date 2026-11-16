@@ -30,7 +30,10 @@ export function WorkspaceSearch() {
 
   const [query, setQuery] = useState('');
   const [isOpen, setIsOpen] = useState(false);
+  const [mobileExpanded, setMobileExpanded] = useState(false);
+  const [highlightedIndex, setHighlightedIndex] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
+  const desktopInputRef = useRef<HTMLInputElement>(null);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -43,6 +46,22 @@ export function WorkspaceSearch() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Global Cmd/Ctrl+K shortcut to focus desktop search
+  useEffect(() => {
+    function handleGlobalShortcut(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        if (desktopInputRef.current && desktopInputRef.current.offsetParent !== null) {
+          e.preventDefault();
+          desktopInputRef.current.focus();
+          desktopInputRef.current.select();
+          setIsOpen(true);
+        }
+      }
+    }
+    window.addEventListener('keydown', handleGlobalShortcut);
+    return () => window.removeEventListener('keydown', handleGlobalShortcut);
+  }, []);
+
   const searchResults = useMemo(() => {
     if (!activeProjectId || !query.trim()) return [];
     const q = query.toLowerCase().trim();
@@ -50,10 +69,8 @@ export function WorkspaceSearch() {
     return blocks
       .filter((b) => b.projectId === activeProjectId)
       .filter((b) => {
-        // Title match
         if (b.title.toLowerCase().includes(q)) return true;
 
-        // Content matches based on kind
         if (b.kind === 'text') {
           const content = (b.data as { content?: string })?.content;
           return typeof content === 'string' && content.toLowerCase().includes(q);
@@ -79,8 +96,13 @@ export function WorkspaceSearch() {
 
         return false;
       })
-      .slice(0, 10); // Limit to top 10 concise results
+      .slice(0, 10);
   }, [blocks, activeProjectId, query]);
+
+  const clampedIndex =
+    searchResults.length === 0
+      ? -1
+      : Math.min(Math.max(0, highlightedIndex), searchResults.length - 1);
 
   const handleSelectResult = (blockId: string, groupId: string) => {
     setFocusedBlockId(null);
@@ -92,7 +114,35 @@ export function WorkspaceSearch() {
     setMobileExpanded(false);
   };
 
-  const [mobileExpanded, setMobileExpanded] = useState(false);
+  const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, isMobile: boolean) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (isMobile) {
+        setMobileExpanded(false);
+        setQuery('');
+      } else {
+        setIsOpen(false);
+        desktopInputRef.current?.blur();
+      }
+      return;
+    }
+
+    if (searchResults.length === 0) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setIsOpen(true);
+      setHighlightedIndex((prev) => (prev + 1) % searchResults.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setIsOpen(true);
+      setHighlightedIndex((prev) => (prev - 1 + searchResults.length) % searchResults.length);
+    } else if (e.key === 'Enter' && clampedIndex >= 0 && searchResults[clampedIndex]) {
+      e.preventDefault();
+      const chosen = searchResults[clampedIndex];
+      handleSelectResult(chosen.id, chosen.groupId);
+    }
+  };
 
   return (
     <>
@@ -113,24 +163,35 @@ export function WorkspaceSearch() {
 
         {/* Mobile search overlay modal */}
         {mobileExpanded && (
-          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col p-3 safe-top">
+          <div
+            className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col p-3 safe-top"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Search project blocks"
+          >
             <div className="flex items-center gap-2 mb-3">
               <div className="relative flex-1 flex items-center">
                 <Search className="w-4 h-4 text-orange-400 absolute left-3 pointer-events-none" />
                 <input
                   type="search"
                   autoFocus
+                  aria-label="Search project files"
                   placeholder="Search project files..."
                   value={query}
-                  onChange={(e) => setQuery(e.target.value)}
+                  onChange={(e) => {
+                    setQuery(e.target.value);
+                    setHighlightedIndex(0);
+                  }}
+                  onKeyDown={(e) => handleInputKeyDown(e, true)}
                   className="w-full glass-menu border border-zinc-700/80 focus:border-orange-500/75 rounded-lg text-base pl-9 pr-8 py-2 text-zinc-100 placeholder:text-zinc-500 outline-none transition font-mono"
                 />
                 {query && (
                   <button
                     type="button"
                     onClick={() => setQuery('')}
-                    className="absolute right-2.5 text-zinc-400 hover:text-zinc-200 p-1"
-                    title="Clear"
+                    className="absolute right-2.5 text-zinc-400 hover:text-zinc-200 p-1 cursor-pointer"
+                    title="Clear search"
+                    aria-label="Clear search"
                   >
                     <X className="w-4 h-4" />
                   </button>
@@ -149,7 +210,11 @@ export function WorkspaceSearch() {
             </div>
 
             {/* Mobile results list */}
-            <div className="flex-1 overflow-y-auto glass-panel border border-zinc-700/80 rounded-lg divide-y divide-zinc-700/60 font-mono text-xs animate-panel-in">
+            <div
+              role="listbox"
+              aria-label="Search results"
+              className="flex-1 overflow-y-auto glass-panel border border-zinc-700/80 rounded-lg divide-y divide-zinc-700/60 font-mono text-xs animate-panel-in"
+            >
               <div className="px-3 py-2 border-b border-zinc-700/70 text-[11px] text-zinc-400 uppercase font-semibold flex justify-between">
                 <span>Results ({searchResults.length})</span>
                 <span>Active Project</span>
@@ -160,16 +225,19 @@ export function WorkspaceSearch() {
                   {query ? 'No matching blocks found.' : 'Type to search...'}
                 </div>
               ) : (
-                searchResults.map((b) => {
+                searchResults.map((b, idx) => {
                   const group = groups.find((g) => g.id === b.groupId);
+                  const isActive = idx === clampedIndex;
                   return (
-                    <div
+                    <button
                       key={b.id}
-                      onClick={() => {
-                        handleSelectResult(b.id, b.groupId);
-                        setMobileExpanded(false);
-                      }}
-                      className="p-3 hover:bg-zinc-800/80 active:bg-zinc-800 cursor-pointer transition flex items-center justify-between gap-2 min-h-[44px]"
+                      type="button"
+                      role="option"
+                      aria-selected={isActive}
+                      onClick={() => handleSelectResult(b.id, b.groupId)}
+                      className={`w-full text-left p-3 hover:bg-zinc-800/80 active:bg-zinc-800 cursor-pointer transition flex items-center justify-between gap-2 min-h-[44px] ${
+                        isActive ? 'bg-orange-500/12' : ''
+                      }`}
                     >
                       <div className="flex items-center gap-2.5 min-w-0">
                         {getKindIcon(b.kind)}
@@ -188,7 +256,7 @@ export function WorkspaceSearch() {
                           <span className="truncate max-w-[100px]">{group.name}</span>
                         </div>
                       )}
-                    </div>
+                    </button>
                   );
                 })
               )}
@@ -202,14 +270,18 @@ export function WorkspaceSearch() {
         <div className="relative flex items-center">
           <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 pointer-events-none" />
           <input
+            ref={desktopInputRef}
             type="text"
-            placeholder="Search project blocks..."
+            aria-label="Search project blocks"
+            placeholder="Search blocks (Ctrl+K)..."
             value={query}
             onFocus={() => setIsOpen(true)}
             onChange={(e) => {
               setQuery(e.target.value);
+              setHighlightedIndex(0);
               setIsOpen(true);
             }}
+            onKeyDown={(e) => handleInputKeyDown(e, false)}
             className="w-full bg-zinc-900/75 border border-zinc-700/80 focus:border-orange-500/75 rounded text-xs pl-8 pr-7 py-1 text-zinc-100 placeholder:text-zinc-500 outline-none transition font-mono"
           />
           {query && (
@@ -221,6 +293,7 @@ export function WorkspaceSearch() {
               }}
               className="absolute right-2 text-zinc-500 hover:text-zinc-300 text-xs p-0.5 cursor-pointer"
               title="Clear search"
+              aria-label="Clear search"
             >
               <X className="w-3 h-3" />
             </button>
@@ -229,7 +302,11 @@ export function WorkspaceSearch() {
 
         {/* Desktop Results Dropdown */}
         {isOpen && query.trim().length > 0 && (
-          <div className="absolute top-full left-0 right-0 mt-1.5 glass-menu border border-zinc-600/80 rounded-lg z-50 overflow-hidden font-mono text-xs max-h-72 overflow-y-auto animate-panel-in">
+          <div
+            role="listbox"
+            aria-label="Search results"
+            className="absolute top-full left-0 right-0 mt-1.5 glass-menu border border-zinc-600/80 rounded-lg z-50 overflow-hidden font-mono text-xs max-h-72 overflow-y-auto animate-panel-in"
+          >
             <div className="px-2.5 py-1.5 border-b border-zinc-700/70 text-[10px] text-zinc-400 uppercase font-semibold flex justify-between">
               <span>Results ({searchResults.length})</span>
               <span>Active Project</span>
@@ -241,13 +318,20 @@ export function WorkspaceSearch() {
               </div>
             ) : (
               <div className="divide-y divide-zinc-700/50">
-                {searchResults.map((b) => {
+                {searchResults.map((b, idx) => {
                   const group = groups.find((g) => g.id === b.groupId);
+                  const isActive = idx === clampedIndex;
                   return (
-                    <div
+                    <button
                       key={b.id}
+                      type="button"
+                      role="option"
+                      aria-selected={isActive}
+                      onMouseEnter={() => setHighlightedIndex(idx)}
                       onClick={() => handleSelectResult(b.id, b.groupId)}
-                      className="p-2 hover:bg-orange-500/12 cursor-pointer transition flex items-center justify-between gap-2"
+                      className={`w-full text-left p-2 hover:bg-orange-500/12 cursor-pointer transition flex items-center justify-between gap-2 ${
+                        isActive ? 'bg-orange-500/15' : ''
+                      }`}
                     >
                       <div className="flex items-center gap-2 min-w-0">
                         {getKindIcon(b.kind)}
@@ -266,7 +350,7 @@ export function WorkspaceSearch() {
                           <span className="truncate max-w-[90px]">{group.name}</span>
                         </div>
                       )}
-                    </div>
+                    </button>
                   );
                 })}
               </div>

@@ -1,9 +1,12 @@
 'use client';
 
-import React, { useRef, useState } from 'react';
+import React, { memo, useCallback, useRef, useState } from 'react';
 import type { Block, UploadBlockData, TetherGroup } from '../../types/model';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { extractZipArchive } from '../../lib/zip';
+import { formatFileSize } from '../../lib/fileTypes';
+import { isBlockPreviewTabCollapsed } from '../../lib/tetherFolderSync';
+import { useBlockResize } from '../../lib/useBlockResize';
 import {
   FileArchive,
   Upload,
@@ -17,7 +20,7 @@ import {
   ChevronRight,
   Maximize2,
   Eye,
-  Search,
+  Link2,
 } from 'lucide-react';
 
 interface UploadBlockProps {
@@ -27,17 +30,24 @@ interface UploadBlockProps {
   isConnectingSource: boolean;
   isValidTarget: boolean;
   isInvalidTarget: boolean;
+  isTetheredChild?: boolean;
+  tetherCount?: number;
+  tetherParentTitle?: string;
+  extractedFolderPaths?: string[];
   onStartTether: (e: React.MouseEvent) => void;
   onCompleteTether: (e: React.MouseEvent) => void;
 }
 
-export function UploadBlock({
+export const UploadBlock = memo(function UploadBlock({
   block,
-  group,
   isSelected,
   isConnectingSource,
   isValidTarget,
   isInvalidTarget,
+  isTetheredChild = false,
+  tetherCount = 0,
+  tetherParentTitle,
+  extractedFolderPaths = [],
   onStartTether,
   onCompleteTether,
 }: UploadBlockProps) {
@@ -48,14 +58,11 @@ export function UploadBlock({
   const deleteBlock = useWorkspaceStore((s) => s.deleteBlock);
   const setFocusedBlockId = useWorkspaceStore((s) => s.setFocusedBlockId);
   const openBlockInEditor = useWorkspaceStore((s) => s.openBlockInEditor);
-  const blocks = useWorkspaceStore((s) => s.blocks);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-  const [isResizing, setIsResizing] = useState(false);
-  const [filterQuery, setFilterQuery] = useState('');
 
   const data = block.data as UploadBlockData;
   const fileName = data?.fileName || '';
@@ -64,35 +71,31 @@ export function UploadBlock({
   const structureCollapsed = Boolean(data?.structureCollapsed);
   const status = block.status;
 
-  const isCollapsed = Boolean(block.collapsed);
+  const isCollapsed = isBlockPreviewTabCollapsed(block, isTetheredChild);
   const handleToggleCollapse = (e: React.MouseEvent) => {
     e.stopPropagation();
     updateBlock(block.id, { collapsed: !isCollapsed });
   };
 
-  const width = block.width ?? 320;
-  const height = block.height;
-
-  // Find all extracted child File blocks
-  const childFileBlocks = blocks.filter(
-    (b) => b.kind === 'file' && extractedBlockIds.includes(b.id)
+  const handleCommitResize = useCallback(
+    (id: string, nextSize: { width: number; height: number }) => {
+      updateBlock(id, nextSize);
+    },
+    [updateBlock]
   );
 
-  // Discover all unique folder paths from child file blocks
-  const discoveredFolderPaths = Array.from(
-    new Set(
-      childFileBlocks
-        .map((b) => (b.data as { parentFolderPath?: string })?.parentFolderPath)
-        .filter((p): p is string => Boolean(p))
-    )
-  );
-
-  const formatSize = (bytes: number) => {
-    if (bytes === 0) return '0 B';
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-  };
+  const { liveWidth, liveHeight, isResizing, handleResizeStart } = useBlockResize({
+    blockId: block.id,
+    width: block.width,
+    height: block.height,
+    defaultWidth: 320,
+    defaultHeight: 260,
+    minWidth: 280,
+    maxWidth: 700,
+    minHeight: 180,
+    maxHeight: 600,
+    onCommit: handleCommitResize,
+  });
 
   const handleProcessZip = async (file: File) => {
     if (!file.name.toLowerCase().endsWith('.zip')) {
@@ -254,7 +257,7 @@ export function UploadBlock({
   const handleExpandAll = () => {
     updateBlockData(block.id, {
       structureCollapsed: false,
-      expandedFolderPaths: discoveredFolderPaths,
+      expandedFolderPaths: extractedFolderPaths,
     });
   };
 
@@ -265,57 +268,22 @@ export function UploadBlock({
     });
   };
 
-  // --- RESIZE CONTROLLER ---
-  const handleResizeStart = (e: React.MouseEvent, direction: 'e' | 's' | 'se') => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsResizing(true);
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const startWidth = block.width ?? 320;
-    const startHeight = block.height ?? 260;
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      let newWidth = startWidth;
-      let newHeight = startHeight;
-
-      if (direction === 'e' || direction === 'se') {
-        newWidth = Math.max(280, Math.min(700, startWidth + (moveEvent.clientX - startX)));
-      }
-      if (direction === 's' || direction === 'se') {
-        newHeight = Math.max(180, Math.min(600, startHeight + (moveEvent.clientY - startY)));
-      }
-
-      updateBlock(block.id, { width: newWidth, height: newHeight });
-    };
-
-    const handleMouseUp = () => {
-      setIsResizing(false);
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-  };
-
-  const filteredCount = filterQuery.trim()
-    ? childFileBlocks.filter((f) =>
-        f.title.toLowerCase().includes(filterQuery.toLowerCase())
-      ).length
-    : childFileBlocks.length;
+  const cardWidth = isCollapsed ? Math.min(liveWidth, 310) : liveWidth;
 
   return (
     <div
       style={{
-        width: `${width}px`,
-        height: isCollapsed ? 'auto' : height ? `${height}px` : undefined,
+        width: `${cardWidth}px`,
+        height: isCollapsed ? 'auto' : liveHeight ? `${liveHeight}px` : undefined,
+        contain: 'layout style',
       }}
       className={`group/box relative flex flex-col glass-card border rounded-lg overflow-hidden transition-[border-color,box-shadow] duration-150 select-none ${
         isResizing ? 'ring-1 ring-orange-500/40' : ''
       } ${
         isSelected
           ? 'border-orange-500 ring-2 ring-orange-500/25 shadow-[0_0_24px_rgba(249,115,22,0.16)]'
+          : isCollapsed && isTetheredChild
+          ? 'border-zinc-700/80 hover:border-orange-500/70'
           : 'border-zinc-700/75 hover:border-orange-500/60'
       } ${
         isConnectingSource
@@ -330,7 +298,11 @@ export function UploadBlock({
       {/* Top 2px Accent Line */}
       <div
         className={`h-0.5 w-full shrink-0 transition-colors ${
-          isSelected ? 'bg-orange-500' : 'bg-zinc-600/80 group-hover/box:bg-orange-500/80'
+          isSelected
+            ? 'bg-orange-500'
+            : isTetheredChild
+            ? 'bg-orange-500/45 group-hover/box:bg-orange-500/85'
+            : 'bg-zinc-600/80 group-hover/box:bg-orange-500/80'
         }`}
       />
 
@@ -343,35 +315,53 @@ export function UploadBlock({
         className="hidden"
       />
 
-      {/* --- HEADER BAR --- */}
+      {/* --- HEADER / PREVIEW TAB BAR --- */}
       <div
         onDoubleClick={(e) => {
           e.stopPropagation();
           openBlockInEditor(block.id);
         }}
-        className="h-9 px-2.5 bg-gradient-to-b from-zinc-800/45 to-zinc-900/60 border-b border-zinc-700/70 flex items-center justify-between shrink-0 cursor-default gap-1.5"
+        className={`px-2.5 bg-gradient-to-b from-zinc-800/45 to-zinc-900/60 flex items-center justify-between shrink-0 cursor-default gap-1.5 ${
+          isCollapsed ? 'min-h-[40px] py-1' : 'h-9 border-b border-zinc-700/70'
+        }`}
       >
         <div className="flex items-center gap-1.5 min-w-0">
           <button
             type="button"
             onClick={handleToggleCollapse}
-            className="text-zinc-400 hover:text-orange-400 p-1 rounded transition-colors cursor-pointer"
-            title={isCollapsed ? 'Expand archive card' : 'Collapse archive card'}
-            aria-label={isCollapsed ? 'Expand archive card' : 'Collapse archive card'}
+            className="text-zinc-400 hover:text-orange-400 p-1 rounded transition-colors cursor-pointer shrink-0"
+            title={isCollapsed ? 'Expand archive preview tab' : 'Collapse to preview tab'}
+            aria-label={isCollapsed ? 'Expand archive preview tab' : 'Collapse to preview tab'}
+            aria-expanded={!isCollapsed}
           >
             {isCollapsed ? (
-              <ChevronRight className="w-3.5 h-3.5 text-zinc-400" />
+              <ChevronRight className="w-3.5 h-3.5 text-orange-400/90" />
             ) : (
               <ChevronDown className="w-3.5 h-3.5 text-orange-400" />
             )}
           </button>
           <FileArchive className="w-3.5 h-3.5 text-orange-400 shrink-0" />
-          <span className="font-mono text-xs font-semibold text-zinc-100 truncate tracking-tight" title={block.title}>
-            {block.title}
-          </span>
+          <div className="min-w-0 flex flex-col">
+            <span className="font-mono text-xs font-semibold text-zinc-100 truncate tracking-tight leading-tight" title={block.title}>
+              {block.title}
+            </span>
+            {isCollapsed && (tetherParentTitle || tetherCount > 0) && (
+              <span className="text-[9px] font-mono text-zinc-400 truncate flex items-center gap-1 leading-tight">
+                <Link2 className="w-2.5 h-2.5 text-orange-400/80 shrink-0" />
+                <span className="truncate">
+                  {tetherParentTitle ? `in ${tetherParentTitle}` : `${tetherCount} tether${tetherCount === 1 ? '' : 's'}`}
+                </span>
+              </span>
+            )}
+          </div>
           <span className="text-[9px] font-mono font-semibold px-1.5 py-0.5 rounded border bg-orange-500/16 text-orange-200 border-orange-500/45 shrink-0">
             ZIP
           </span>
+          {isCollapsed && (
+            <span className="text-[10px] font-mono text-zinc-400 shrink-0 tabular-nums">
+              {extractedBlockIds.length}f
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
@@ -389,18 +379,20 @@ export function UploadBlock({
           </button>
 
           {/* Maximize Button */}
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              setFocusedBlockId(block.id);
-            }}
-            className="p-1 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded transition cursor-pointer"
-            title="Expand into Focus Mode"
-            aria-label="Expand into Focus Mode"
-          >
-            <Maximize2 className="w-3 h-3" />
-          </button>
+          {!isCollapsed && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setFocusedBlockId(block.id);
+              }}
+              className="p-1 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded transition cursor-pointer"
+              title="Expand into Focus Mode"
+              aria-label="Expand into Focus Mode"
+            >
+              <Maximize2 className="w-3 h-3" />
+            </button>
+          )}
 
           {/* Tether Action Button */}
           {!isConnectingSource && !isValidTarget && !isInvalidTarget && (
@@ -411,7 +403,7 @@ export function UploadBlock({
               title="Start tether from this archive"
             >
               <ArrowRight className="w-2.5 h-2.5" />
-              <span>Tether</span>
+              {!isCollapsed && <span>Tether</span>}
             </button>
           )}
 
@@ -440,189 +432,184 @@ export function UploadBlock({
 
       {/* --- PRIMARY BODY CANVAS --- */}
       {!isCollapsed && (
-      <>
-      <div className="flex-1 p-3 bg-[#0E1013] overflow-y-auto space-y-2.5 select-text font-mono text-xs">
-        {status === 'extracting' ? (
-          <div className="p-6 bg-[#13151A] border border-[#22262B] rounded flex flex-col items-center justify-center space-y-2">
-            <Loader2 className="w-6 h-6 text-amber-400 animate-spin" />
-            <div className="text-xs text-zinc-200 font-semibold">Extracting archive...</div>
-            <div className="text-[10px] text-zinc-500">In-browser JSZip stream</div>
-          </div>
-        ) : fileName ? (
-          <div className="p-2.5 bg-[#13151A] border border-[#22262B] rounded space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 min-w-0">
-                <FileArchive className="w-4 h-4 text-amber-400 shrink-0" />
-                <span className="text-xs font-semibold text-zinc-200 truncate">{fileName}</span>
+        <>
+          <div className="flex-1 p-3 bg-[#0E1013] overflow-y-auto space-y-2.5 select-text font-mono text-xs">
+            {status === 'extracting' ? (
+              <div className="p-6 bg-[#13151A] border border-[#22262B] rounded flex flex-col items-center justify-center space-y-2">
+                <Loader2 className="w-6 h-6 text-amber-400 animate-spin" />
+                <div className="text-xs text-zinc-200 font-semibold">Extracting archive...</div>
+                <div className="text-[10px] text-zinc-500">In-browser JSZip stream</div>
               </div>
-              <span className="text-[10px] text-zinc-400 shrink-0">
-                {formatSize(size)}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between text-[11px] text-zinc-400 pt-1.5 border-t border-[#1E2228]">
-              <span>{extractedBlockIds.length} entries extracted</span>
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="hover:text-amber-300 text-zinc-400 flex items-center gap-1 text-[10px] transition cursor-pointer"
-                title="Replace with new ZIP archive"
-              >
-                <RefreshCw className="w-2.5 h-2.5" />
-                <span>Replace</span>
-              </button>
-            </div>
-
-            {/* Large Architecture Search Filter */}
-            {childFileBlocks.length > 5 && (
-              <div className="relative flex items-center pt-1">
-                <Search className="w-3 h-3 text-zinc-500 absolute left-2 pointer-events-none" />
-                <input
-                  type="text"
-                  placeholder="Filter files in archive..."
-                  value={filterQuery}
-                  onChange={(e) => setFilterQuery(e.target.value)}
-                  className="w-full bg-[#090A0D] border border-[#1E2228] rounded pl-6 pr-2 py-0.5 text-[10px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/50"
-                  onMouseDown={(e) => e.stopPropagation()}
-                />
-              </div>
-            )}
-
-            {/* Tree Collapsible Controls */}
-            {extractedBlockIds.length > 0 && (
-              <div className="pt-2 border-t border-[#1E2228] space-y-1.5 font-mono">
+            ) : fileName ? (
+              <div className="p-2.5 bg-[#13151A] border border-[#22262B] rounded space-y-2">
                 <div className="flex items-center justify-between">
-                  <button
-                    type="button"
-                    onClick={toggleStructureCollapse}
-                    className="flex items-center gap-1.5 text-[11px] text-zinc-100 hover:text-orange-300 transition cursor-pointer"
-                  >
-                    {structureCollapsed ? (
-                      <ChevronRight className="w-3.5 h-3.5 text-orange-400" />
-                    ) : (
-                      <ChevronDown className="w-3.5 h-3.5 text-orange-400" />
-                    )}
-                    <span className="font-medium">
-                      {structureCollapsed ? 'Expand Tree' : 'Collapse Tree'}
-                    </span>
-                  </button>
-
-                  {structureCollapsed && (
-                    <span className="text-[10px] text-orange-300 bg-orange-500/15 border border-orange-500/40 px-1.5 py-0.5 rounded tabular-nums">
-                      {extractedBlockIds.length} hidden
-                    </span>
-                  )}
+                  <div className="flex items-center gap-2 min-w-0">
+                    <FileArchive className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span className="text-xs font-semibold text-zinc-200 truncate">{fileName}</span>
+                  </div>
+                  <span className="text-[10px] text-zinc-400 shrink-0">
+                    {formatFileSize(size)}
+                  </span>
                 </div>
 
-                {!structureCollapsed && discoveredFolderPaths.length > 0 && (
-                  <div className="flex items-center justify-between text-[10px] text-zinc-400 pt-0.5">
-                    <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between text-[11px] text-zinc-400 pt-1.5 border-t border-[#1E2228]">
+                  <span>{extractedBlockIds.length} entries extracted</span>
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="hover:text-amber-300 text-zinc-400 flex items-center gap-1 text-[10px] transition cursor-pointer"
+                    title="Replace with new ZIP archive"
+                  >
+                    <RefreshCw className="w-2.5 h-2.5" />
+                    <span>Replace</span>
+                  </button>
+                </div>
+
+                {/* Tree Collapsible Controls */}
+                {extractedBlockIds.length > 0 && (
+                  <div className="pt-2 border-t border-[#1E2228] space-y-1.5 font-mono">
+                    <div className="flex items-center justify-between">
                       <button
                         type="button"
-                        onClick={handleExpandAll}
-                        className="hover:text-zinc-200 transition underline cursor-pointer"
+                        onClick={toggleStructureCollapse}
+                        className="flex items-center gap-1.5 text-[11px] text-zinc-100 hover:text-orange-300 transition cursor-pointer"
                       >
-                        Expand All
+                        {structureCollapsed ? (
+                          <ChevronRight className="w-3.5 h-3.5 text-orange-400" />
+                        ) : (
+                          <ChevronDown className="w-3.5 h-3.5 text-orange-400" />
+                        )}
+                        <span className="font-medium">
+                          {structureCollapsed ? 'Expand Tree' : 'Collapse Tree'}
+                        </span>
                       </button>
-                      <span>•</span>
-                      <button
-                        type="button"
-                        onClick={handleCollapseAll}
-                        className="hover:text-zinc-200 transition underline cursor-pointer"
-                      >
-                        Collapse All
-                      </button>
+
+                      {structureCollapsed && (
+                        <span className="text-[10px] text-orange-300 bg-orange-500/15 border border-orange-500/40 px-1.5 py-0.5 rounded tabular-nums">
+                          {extractedBlockIds.length} hidden
+                        </span>
+                      )}
                     </div>
-                    <span className="text-zinc-500">{discoveredFolderPaths.length} folders</span>
+
+                    {!structureCollapsed && extractedFolderPaths.length > 0 && (
+                      <div className="flex items-center justify-between text-[10px] text-zinc-400 pt-0.5">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={handleExpandAll}
+                            className="hover:text-zinc-200 transition underline cursor-pointer"
+                          >
+                            Expand All
+                          </button>
+                          <span>•</span>
+                          <button
+                            type="button"
+                            onClick={handleCollapseAll}
+                            className="hover:text-zinc-200 transition underline cursor-pointer"
+                          >
+                            Collapse All
+                          </button>
+                        </div>
+                        <span className="text-zinc-500">{extractedFolderPaths.length} folders</span>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
+            ) : (
+              <div
+                role="button"
+                tabIndex={0}
+                aria-label="Choose or drop .ZIP archive"
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDraggingOver(true);
+                }}
+                onDragLeave={() => setIsDraggingOver(false)}
+                onDrop={handleDrop}
+                onClick={() => fileInputRef.current?.click()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    fileInputRef.current?.click();
+                  }
+                }}
+                className={`p-6 border-2 border-dashed rounded-lg flex flex-col items-center justify-center text-center cursor-pointer transition ${
+                  isDraggingOver
+                    ? 'border-amber-400 bg-amber-950/20'
+                    : 'border-[#22262B] hover:border-amber-500/50 bg-[#13151A]'
+                }`}
+              >
+                <Upload className="w-5 h-5 text-amber-400 mb-1.5" />
+                <div className="text-xs font-semibold text-zinc-200">Choose or drop .ZIP archive</div>
+                <div className="text-[10px] text-zinc-400 mt-0.5">
+                  Instant in-memory extraction
+                </div>
+              </div>
+            )}
+
+            {errorMessage && (
+              <div className="p-2 bg-red-950/40 border border-red-900/60 rounded text-[11px] text-red-300 flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                <span className="truncate">{errorMessage}</span>
+              </div>
             )}
           </div>
-        ) : (
-          <div
-            onDragOver={(e) => {
-              e.preventDefault();
-              setIsDraggingOver(true);
-            }}
-            onDragLeave={() => setIsDraggingOver(false)}
-            onDrop={handleDrop}
-            onClick={() => fileInputRef.current?.click()}
-            className={`p-6 border-2 border-dashed rounded-lg flex flex-col items-center justify-center text-center cursor-pointer transition ${
-              isDraggingOver
-                ? 'border-amber-400 bg-amber-950/20'
-                : 'border-[#22262B] hover:border-amber-500/50 bg-[#13151A]'
-            }`}
-          >
-            <Upload className="w-5 h-5 text-amber-400 mb-1.5" />
-            <div className="text-xs font-semibold text-zinc-200">Choose or drop .ZIP archive</div>
-            <div className="text-[10px] text-zinc-500 mt-0.5">
-              Instant in-memory extraction
+
+          {/* --- EXTENSION DRAWER --- */}
+          {isDrawerOpen && (
+            <div className="border-t border-[#22262B] bg-[#13151A] p-2.5 overflow-auto text-[11px] font-mono text-zinc-400 space-y-1 max-h-36">
+              <div className="flex items-center justify-between pb-1 border-b border-[#1E2228] text-zinc-500 text-[10px] uppercase font-semibold">
+                <span>Archive Manifest</span>
+                <span>Local DB</span>
+              </div>
+              <div className="space-y-1 text-[10px]">
+                <div><strong className="text-zinc-300">Archive:</strong> {fileName || 'None'}</div>
+                <div><strong className="text-zinc-300">Compressed:</strong> {formatFileSize(size)}</div>
+                <div><strong className="text-zinc-300">Extracted:</strong> {extractedBlockIds.length} files</div>
+                <div><strong className="text-zinc-300">Folders:</strong> {extractedFolderPaths.length}</div>
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {errorMessage && (
-          <div className="p-2 bg-red-950/40 border border-red-900/60 rounded text-[11px] text-red-300 flex items-center gap-1.5">
-            <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0" />
-            <span className="truncate">{errorMessage}</span>
+          {/* Footer / Status Bar */}
+          <div className="h-[26px] px-3 border-t border-[#1C2025] bg-[#111317] flex items-center justify-between text-[10px] font-mono text-zinc-400 shrink-0">
+            <div className="flex items-center gap-2">
+              <span>{extractedBlockIds.length} files</span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsDrawerOpen(!isDrawerOpen);
+                }}
+                aria-expanded={isDrawerOpen}
+                className="text-zinc-300 hover:text-white flex items-center gap-0.5 ml-1 cursor-pointer hover:underline"
+              >
+                {isDrawerOpen ? <ChevronDown className="w-2.5 h-2.5" /> : <ChevronRight className="w-2.5 h-2.5" />}
+                <span>Manifest</span>
+              </button>
+            </div>
+            <span className="uppercase text-amber-400/90 font-medium">{status}</span>
           </div>
-        )}
-      </div>
 
-      {/* --- EXTENSION DRAWER --- */}
-      {isDrawerOpen && (
-        <div className="border-t border-[#22262B] bg-[#13151A] p-2.5 overflow-auto text-[11px] font-mono text-zinc-400 space-y-1 max-h-36">
-          <div className="flex items-center justify-between pb-1 border-b border-[#1E2228] text-zinc-500 text-[10px] uppercase font-semibold">
-            <span>Archive Manifest</span>
-            <span>Local DB</span>
-          </div>
-          <div className="space-y-1 text-[10px]">
-            <div><strong className="text-zinc-300">Archive:</strong> {fileName || 'None'}</div>
-            <div><strong className="text-zinc-300">Compressed:</strong> {formatSize(size)}</div>
-            <div><strong className="text-zinc-300">Extracted:</strong> {extractedBlockIds.length} files</div>
-            <div><strong className="text-zinc-300">Folders:</strong> {discoveredFolderPaths.length}</div>
-          </div>
-        </div>
-      )}
-
-      {/* Footer / Status Bar */}
-      <div className="h-[26px] px-3 border-t border-[#1C2025] bg-[#111317] flex items-center justify-between text-[10px] font-mono text-zinc-500 shrink-0">
-        <div className="flex items-center gap-2">
-          <span>{extractedBlockIds.length} files</span>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              setIsDrawerOpen(!isDrawerOpen);
-            }}
-            className="text-zinc-400 hover:text-zinc-200 flex items-center gap-0.5 ml-1 cursor-pointer hover:underline"
-          >
-            {isDrawerOpen ? <ChevronDown className="w-2.5 h-2.5" /> : <ChevronRight className="w-2.5 h-2.5" />}
-            <span>Manifest</span>
-          </button>
-        </div>
-        <span className="uppercase text-amber-400/90 font-medium">{status}</span>
-      </div>
-
-      {/* --- INTERACTIVE RESIZE BORDERS --- */}
-      <div
-        onMouseDown={(e) => handleResizeStart(e, 'e')}
-        className="absolute -right-1 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-amber-500/30 transition-colors z-20"
-        title="Resize width"
-      />
-      <div
-        onMouseDown={(e) => handleResizeStart(e, 's')}
-        className="absolute left-0 -bottom-1 right-0 h-2 cursor-ns-resize hover:bg-amber-500/30 transition-colors z-20"
-        title="Resize height"
-      />
-      <div
-        onMouseDown={(e) => handleResizeStart(e, 'se')}
-        className="absolute -right-1 -bottom-1 w-3.5 h-3.5 cursor-nwse-resize z-30 hover:bg-amber-500/50 rounded-br transition-colors"
-        title="Resize card"
-      />
-      </>
+          {/* --- INTERACTIVE RESIZE BORDERS --- */}
+          <div
+            onMouseDown={(e) => handleResizeStart(e, 'e')}
+            className="absolute -right-1 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-amber-500/30 transition-colors z-20"
+            title="Resize width"
+          />
+          <div
+            onMouseDown={(e) => handleResizeStart(e, 's')}
+            className="absolute left-0 -bottom-1 right-0 h-2 cursor-ns-resize hover:bg-amber-500/30 transition-colors z-20"
+            title="Resize height"
+          />
+          <div
+            onMouseDown={(e) => handleResizeStart(e, 'se')}
+            className="absolute -right-1 -bottom-1 w-3.5 h-3.5 cursor-nwse-resize z-30 hover:bg-amber-500/50 rounded-br transition-colors"
+            title="Resize card"
+          />
+        </>
       )}
     </div>
   );
-}
+});

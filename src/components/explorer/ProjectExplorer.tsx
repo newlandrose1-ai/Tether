@@ -1,18 +1,16 @@
 'use client';
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { FileTreeNode, type TreeNodeItem } from './FileTreeNode';
 import type { Block, CodeBlockData, FileBlockData } from '../../types/model';
 import {
   Search,
   FilePlus,
-  FolderPlus,
-  FolderOpen,
-  Folder,
   X,
   Check,
   ChevronDown,
+  ChevronRight,
   ChevronsDown,
   ChevronsUp,
 } from 'lucide-react';
@@ -48,16 +46,22 @@ export function ProjectExplorer() {
   const [renameValue, setRenameValue] = useState('');
 
   const [deletingBlock, setDeletingBlock] = useState<Block | null>(null);
+  const [isUntetheredExpanded, setIsUntetheredExpanded] = useState(true);
 
-  const activeProject = projects.find((p) => p.id === activeProjectId);
-
-  // Build hierarchical tree structure from blocks in active project
-  const { treeData, allFolderPaths, matchCount } = useMemo(() => {
+  // Build hierarchical tree structure strictly from tethered blocks in active project
+  const { treeData, allFolderPaths, matchCount, untetheredNodes } = useMemo(() => {
     if (!activeProjectId) {
-      return { treeData: [], allFolderPaths: new Set<string>(), matchCount: 0 };
+      return {
+        treeData: [],
+        allFolderPaths: new Set<string>(),
+        matchCount: 0,
+        untetheredNodes: [] as TreeNodeItem[],
+      };
     }
 
     const projectBlocks = blocks.filter((b) => b.projectId === activeProjectId);
+    const syncedBlocks = projectBlocks.filter((b) => Boolean(b.isInFolderStructure));
+    const untetheredBlocks = projectBlocks.filter((b) => !b.isInFolderStructure);
     const query = filterQuery.trim().toLowerCase();
 
     const rootItems: TreeNodeItem[] = [];
@@ -87,8 +91,8 @@ export function ProjectExplorer() {
       return folderItem;
     };
 
-    projectBlocks.forEach((b) => {
-      let rawPath = (b.data as CodeBlockData | FileBlockData)?.path || b.title;
+    syncedBlocks.forEach((b) => {
+      let rawPath = b.sourcePath || (b.data as CodeBlockData | FileBlockData)?.path || b.title;
       rawPath = rawPath.replace(/^\/+/, '');
       const segments = rawPath.split('/');
 
@@ -155,10 +159,37 @@ export function ProjectExplorer() {
 
     sortTree(rootItems);
 
+    const untetheredList: TreeNodeItem[] = [];
+    untetheredBlocks.forEach((b) => {
+      const rawPath = (
+        b.sourcePath ||
+        (b.data as CodeBlockData | FileBlockData)?.path ||
+        b.title
+      ).replace(/^\/+/, '');
+      const isMatch =
+        !query ||
+        b.title.toLowerCase().includes(query) ||
+        rawPath.toLowerCase().includes(query);
+      if (isMatch) {
+        if (query) matches++;
+        untetheredList.push({
+          id: b.id,
+          name: b.title,
+          isFolder: false,
+          path: rawPath,
+          block: b,
+        });
+      }
+    });
+    untetheredList.sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+    );
+
     return {
       treeData: rootItems,
       allFolderPaths: folderPaths,
-      matchCount: query ? matches : projectBlocks.length,
+      matchCount: query ? matches : syncedBlocks.length,
+      untetheredNodes: untetheredList,
     };
   }, [blocks, activeProjectId, filterQuery]);
 
@@ -250,7 +281,15 @@ export function ProjectExplorer() {
 
   const handleSaveRename = async () => {
     if (renamingBlock && renameValue.trim()) {
-      await updateBlock(renamingBlock.id, { title: renameValue.trim() });
+      const nextTitle = renameValue.trim();
+      const oldPath =
+        renamingBlock.sourcePath ||
+        (renamingBlock.data as { path?: string })?.path ||
+        renamingBlock.title;
+      const parts = oldPath.replace(/^\/+/, '').split('/');
+      const nextPath =
+        parts.length > 1 ? `${parts.slice(0, -1).join('/')}/${nextTitle}` : nextTitle;
+      await updateBlock(renamingBlock.id, { title: nextTitle, sourcePath: nextPath });
     }
     setRenamingBlock(null);
   };
@@ -450,7 +489,7 @@ export function ProjectExplorer() {
 
       {/* 5. Hierarchical File Tree View */}
       <div role="tree" aria-label="Project files" className="flex-1 overflow-y-auto px-1 py-1.5 space-y-0.5">
-        {treeData.length === 0 ? (
+        {treeData.length === 0 && untetheredNodes.length === 0 ? (
           <div className="p-6 text-center text-xs text-zinc-400 font-mono space-y-3">
             <p>{filterQuery ? 'No matching files found.' : 'No files in this project.'}</p>
             {!filterQuery && (
@@ -464,25 +503,79 @@ export function ProjectExplorer() {
             )}
           </div>
         ) : (
-          treeData.map((node) => (
-            <FileTreeNode
-              key={node.id}
-              item={node}
-              level={0}
-              activeId={activeEditorBlockId}
-              filterQuery={filterQuery}
-              expandedFolders={expandedFolders}
-              onToggleFolder={handleToggleFolder}
-              onSelect={handleSelectBlock}
-              onRename={(block) => {
-                setRenamingBlock(block);
-                setRenameValue(block.title);
-              }}
-              onDuplicate={handleDuplicateBlock}
-              onDelete={(block) => setDeletingBlock(block)}
-              onCreateFileInFolder={handleCreateInFolder}
-            />
-          ))
+          <>
+            {treeData.length === 0 ? (
+              <div className="px-2.5 py-2 text-[11px] text-zinc-500 font-mono">
+                {filterQuery
+                  ? 'No matching tethered files.'
+                  : 'Tether blocks on the canvas to sync them into the folder tree.'}
+              </div>
+            ) : (
+              treeData.map((node) => (
+                <FileTreeNode
+                  key={node.id}
+                  item={node}
+                  level={0}
+                  activeId={activeEditorBlockId}
+                  filterQuery={filterQuery}
+                  expandedFolders={expandedFolders}
+                  onToggleFolder={handleToggleFolder}
+                  onSelect={handleSelectBlock}
+                  onRename={(block) => {
+                    setRenamingBlock(block);
+                    setRenameValue(block.title);
+                  }}
+                  onDuplicate={handleDuplicateBlock}
+                  onDelete={(block) => setDeletingBlock(block)}
+                  onCreateFileInFolder={handleCreateInFolder}
+                />
+              ))
+            )}
+
+            {untetheredNodes.length > 0 && (
+              <div className="mt-2 pt-2 border-t border-zinc-800/70">
+                <button
+                  type="button"
+                  onClick={() => setIsUntetheredExpanded((prev) => !prev)}
+                  className="w-full px-2 py-1 flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                  aria-expanded={isUntetheredExpanded}
+                >
+                  <span className="flex items-center gap-1">
+                    {isUntetheredExpanded ? (
+                      <ChevronDown className="w-3 h-3 text-zinc-500" />
+                    ) : (
+                      <ChevronRight className="w-3 h-3 text-zinc-500" />
+                    )}
+                    <span>Untethered</span>
+                  </span>
+                  <span className="text-zinc-500 tabular-nums">{untetheredNodes.length}</span>
+                </button>
+
+                {isUntetheredExpanded && (
+                  <div className="mt-0.5 space-y-0.5">
+                    {untetheredNodes.map((node) => (
+                      <FileTreeNode
+                        key={node.id}
+                        item={node}
+                        level={0}
+                        activeId={activeEditorBlockId}
+                        filterQuery={filterQuery}
+                        expandedFolders={expandedFolders}
+                        onToggleFolder={handleToggleFolder}
+                        onSelect={handleSelectBlock}
+                        onRename={(block) => {
+                          setRenamingBlock(block);
+                          setRenameValue(block.title);
+                        }}
+                        onDuplicate={handleDuplicateBlock}
+                        onDelete={(block) => setDeletingBlock(block)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
 

@@ -35,6 +35,7 @@ export function WorkspaceStatusBar() {
             if (isEditorOpen) closeEditorModal();
             toggleSidebar();
           }}
+          aria-pressed={!isSidebarCollapsed}
           className={`flex flex-col items-center justify-center flex-1 h-full min-h-[44px] py-1 transition-colors cursor-pointer ${
             !isSidebarCollapsed
               ? 'text-orange-400 font-semibold'
@@ -53,6 +54,7 @@ export function WorkspaceStatusBar() {
             if (isEditorOpen) closeEditorModal();
             if (!isSidebarCollapsed) toggleSidebar();
           }}
+          aria-pressed={isSidebarCollapsed && !isEditorOpen}
           className={`flex flex-col items-center justify-center flex-1 h-full min-h-[44px] py-1 transition-colors cursor-pointer ${
             isSidebarCollapsed && !isEditorOpen
               ? 'text-orange-400 font-semibold'
@@ -73,19 +75,20 @@ export function WorkspaceStatusBar() {
               if (isEditorOpen) closeEditorModal();
               else openBlockInEditor(editableTargetId);
             }}
+            aria-pressed={isEditorOpen}
             className={`flex flex-col items-center justify-center flex-1 h-full min-h-[44px] py-1 transition-colors cursor-pointer ${
               isEditorOpen
                 ? 'text-orange-400 font-semibold'
                 : 'text-zinc-400 hover:text-zinc-200'
             }`}
-            aria-label="Open Pop-up Editor"
+            aria-label="Toggle Pop-up Editor"
           >
             <Edit3 className="w-5 h-5" />
             <span className="text-[10px] font-mono mt-0.5">Editor</span>
           </button>
         )}
 
-        {/* Selected Block Details */}
+        {/* Clear Selected Block */}
         {selectedBlockId && (
           <button
             type="button"
@@ -93,11 +96,12 @@ export function WorkspaceStatusBar() {
               if (isEditorOpen) closeEditorModal();
               selectBlock(null);
             }}
-            className="flex flex-col items-center justify-center flex-1 h-full min-h-[44px] py-1 text-zinc-200 hover:text-orange-300 font-semibold transition-colors cursor-pointer"
-            aria-label="Clear Selection"
+            className="flex flex-col items-center justify-center flex-1 h-full min-h-[44px] py-1 text-zinc-300 hover:text-orange-300 font-semibold transition-colors cursor-pointer"
+            aria-label="Deselect current block"
+            title="Deselect current block"
           >
             <Layers className="w-5 h-5" />
-            <span className="text-[10px] font-mono mt-0.5">Details</span>
+            <span className="text-[10px] font-mono mt-0.5">Deselect</span>
           </button>
         )}
       </div>

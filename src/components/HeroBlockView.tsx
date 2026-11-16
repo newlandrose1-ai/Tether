@@ -231,11 +231,16 @@ export function HeroBlockView({
           )}
 
           {block.kind === 'text' && (
-            <HeroTextBlock block={block as Block<TextBlockData>} onUpdateData={updateBlockData} />
+            <HeroTextBlock
+              key={block.id}
+              block={block as Block<TextBlockData>}
+              onUpdateData={updateBlockData}
+            />
           )}
 
           {block.kind === 'file' && (
             <HeroFileBlock
+              key={block.id}
               block={block as Block<FileBlockData>}
               allBlocks={blocks}
               onOpenBlock={(targetId) => setFocusedBlockId(targetId)}
@@ -244,6 +249,7 @@ export function HeroBlockView({
 
           {block.kind === 'code' && (
             <HeroCodeBlock
+              key={block.id}
               block={block as Block<CodeBlockData>}
               tethers={tethers}
               blocks={blocks}
@@ -507,8 +513,23 @@ function HeroCodeBlock({
   const isDirty = draftContent !== currentContent;
 
   const handleSave = async () => {
-    await onSaveDraft(block.id, draftContent);
+    const latest = editorViewRef.current ? editorViewRef.current.state.doc.toString() : draftContent;
+    await onSaveDraft(block.id, latest);
   };
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        const latest = editorViewRef.current ? editorViewRef.current.state.doc.toString() : '';
+        if (editorViewRef.current) {
+          void onSaveDraft(block.id, latest);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [block.id, onSaveDraft]);
 
   const handleCreateSnapshot = async () => {
     const finalLabel = snapshotLabel.trim() || 'snapshot';
@@ -537,6 +558,7 @@ function HeroCodeBlock({
           <select
             value={language}
             onChange={(e) => handleLanguageChange(e.target.value)}
+            aria-label="Code language"
             className="text-xs font-mono uppercase bg-zinc-800/90 text-zinc-200 border border-zinc-700 rounded px-2 py-1 outline-none cursor-pointer"
           >
             {SUPPORTED_LANGUAGES.map((l) => (
@@ -615,6 +637,7 @@ function HeroCodeBlock({
           <input
             type="text"
             autoFocus
+            aria-label="Snapshot label"
             placeholder="e.g. checkpoint-1, before-refactor..."
             value={snapshotLabel}
             onChange={(e) => setSnapshotLabel(e.target.value)}

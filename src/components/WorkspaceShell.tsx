@@ -29,10 +29,16 @@ import {
   PanelLeft,
   PanelRight,
   FolderGit2,
+  FileArchive,
+  ShieldCheck,
+  CheckCircle2,
 } from 'lucide-react';
 import { WebHtmlExportModal } from './export/WebHtmlExportModal';
 import { GitHubDeployModal } from './github/GitHubDeployModal';
+import { AuditAutofixModal } from './audit/AuditAutofixModal';
+import { AddImageModal } from './media/AddImageModal';
 import { fetchGitHubSession, type GitHubSessionInfo } from '../lib/githubClient';
+import { exportProjectToZip } from '../lib/projectZipExport';
 
 export function WorkspaceShell() {
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
@@ -59,6 +65,9 @@ export function WorkspaceShell() {
   const toggleSidebar = useWorkspaceStore((s) => s.toggleSidebar);
   const toggleHeader = useWorkspaceStore((s) => s.toggleHeader);
   const toggleBlockInspector = useWorkspaceStore((s) => s.toggleBlockInspector);
+  const openAuditModal = useWorkspaceStore((s) => s.openAuditModal);
+  const imageFeedback = useWorkspaceStore((s) => s.imageFeedback);
+  const clearImageFeedback = useWorkspaceStore((s) => s.clearImageFeedback);
 
   const [isHeroInspectorOpen, setIsHeroInspectorOpen] = useState(false);
 
@@ -78,16 +87,48 @@ export function WorkspaceShell() {
   }, []);
 
   useEffect(() => {
+    if (!imageFeedback) return;
+    const timer = window.setTimeout(() => {
+      clearImageFeedback();
+    }, 4500);
+    return () => window.clearTimeout(timer);
+  }, [imageFeedback, clearImageFeedback]);
+
+  useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as globalThis.Node)) {
         setIsExportMenuOpen(false);
       }
     };
-    if (isExportMenuOpen) {
-      document.addEventListener('mousedown', handleClickOutside);
-      return () => document.removeEventListener('mousedown', handleClickOutside);
-    }
-  }, [isExportMenuOpen]);
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (isExportMenuOpen) {
+        setIsExportMenuOpen(false);
+        return;
+      }
+      if (typeof window !== 'undefined' && window.innerWidth < 768) {
+        const state = useWorkspaceStore.getState();
+        if (!state.isSidebarCollapsed) {
+          state.toggleSidebar();
+          return;
+        }
+        if (focusedBlockId && isHeroInspectorOpen) {
+          setIsHeroInspectorOpen(false);
+          return;
+        }
+        if (!focusedBlockId && selectedBlockId) {
+          state.selectBlock(null);
+          return;
+        }
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [isExportMenuOpen, focusedBlockId, isHeroInspectorOpen, selectedBlockId]);
 
   // Collapse sidebar on narrow mobile viewports on initial mount so the user lands directly on the canvas
   useEffect(() => {
@@ -233,6 +274,18 @@ export function WorkspaceShell() {
 
             <WorkspaceSearch />
 
+            {activeProject && (
+              <button
+                type="button"
+                onClick={() => openAuditModal({ targetType: 'project' })}
+                className="flex items-center gap-1.5 px-2.5 py-1 min-h-[32px] bg-zinc-900/75 hover:bg-orange-500/15 border border-zinc-700/80 hover:border-orange-500/60 text-zinc-200 hover:text-white rounded text-xs font-mono transition cursor-pointer whitespace-nowrap shrink-0"
+                title="Audit live project & zip structure"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-orange-400" />
+                <span className="hidden sm:inline">Audit</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => setIsGitHubModalOpen(true)}
@@ -283,7 +336,7 @@ export function WorkspaceShell() {
                 }`}
                 title="Export or import project"
                 aria-expanded={isExportMenuOpen}
-                aria-haspopup="true"
+                aria-haspopup="menu"
               >
                 <Download className="w-3.5 h-3.5 text-orange-400" />
                 <span className="hidden sm:inline">Export</span>
@@ -295,9 +348,42 @@ export function WorkspaceShell() {
               </button>
 
               {isExportMenuOpen && (
-                <div className="absolute right-0 top-full mt-1.5 w-48 glass-menu border border-zinc-600/80 rounded-lg z-50 p-1 font-mono text-xs space-y-0.5 animate-panel-in">
+                <div
+                  role="menu"
+                  aria-label="Export and import options"
+                  className="absolute right-0 top-full mt-1.5 w-52 glass-menu border border-zinc-600/80 rounded-lg z-50 p-1 font-mono text-xs space-y-0.5 animate-panel-in"
+                >
+                  {activeProject && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setIsExportMenuOpen(false);
+                        void exportProjectToZip(activeProject, blocks, { includeUntethered: true });
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-2 text-left text-orange-100 hover:text-white bg-orange-500/15 hover:bg-orange-500/25 border border-orange-500/40 rounded transition cursor-pointer font-medium"
+                    >
+                      <FileArchive className="w-3.5 h-3.5 text-orange-400 flex-shrink-0" />
+                      <span>Download Project (.zip)</span>
+                    </button>
+                  )}
+
                   <button
                     type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setIsExportMenuOpen(false);
+                      setIsWebExportOpen(true);
+                    }}
+                    className="w-full flex items-center gap-2 px-2.5 py-2 text-left text-zinc-200 hover:text-white hover:bg-zinc-800/80 rounded transition cursor-pointer"
+                  >
+                    <Globe className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
+                    <span>Export Options / Web</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
                     onClick={() => {
                       setIsExportMenuOpen(false);
                       setIsGitHubModalOpen(true);
@@ -310,18 +396,7 @@ export function WorkspaceShell() {
 
                   <button
                     type="button"
-                    onClick={() => {
-                      setIsExportMenuOpen(false);
-                      setIsWebExportOpen(true);
-                    }}
-                    className="w-full flex items-center gap-2 px-2.5 py-2 text-left text-zinc-200 hover:text-white hover:bg-zinc-800/80 rounded transition cursor-pointer"
-                  >
-                    <Globe className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
-                    <span>Web HTML / ZIP</span>
-                  </button>
-
-                  <button
-                    type="button"
+                    role="menuitem"
                     onClick={() => {
                       setIsExportMenuOpen(false);
                       handleExport();
@@ -336,6 +411,7 @@ export function WorkspaceShell() {
 
                   <button
                     type="button"
+                    role="menuitem"
                     onClick={() => {
                       setIsExportMenuOpen(false);
                       fileInputRef.current?.click();
@@ -365,7 +441,11 @@ export function WorkspaceShell() {
 
       {/* Import Confirmation Dialog */}
       {importCandidate && (
-        <div className="p-3 bg-zinc-900/95 border-b border-amber-900/60 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between z-30 font-mono text-xs text-zinc-200 gap-3">
+        <div
+          role="alertdialog"
+          aria-label="Import workspace confirmation"
+          className="p-3 bg-zinc-900/95 border-b border-amber-900/60 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between z-30 font-mono text-xs text-zinc-200 gap-3"
+        >
           <div className="flex items-center gap-2.5">
             <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
             <div>
@@ -425,7 +505,12 @@ export function WorkspaceShell() {
         {/* Mobile Project Hierarchy Drawer */}
         <div className="md:hidden">
           {!isSidebarCollapsed && (
-            <div className="fixed inset-0 z-50 flex">
+            <div
+              className="fixed inset-0 z-50 flex"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Project hierarchy sidebar"
+            >
               <div
                 className="fixed inset-0 bg-black/75 backdrop-blur-xs"
                 onClick={toggleSidebar}
@@ -507,7 +592,12 @@ export function WorkspaceShell() {
           {/* Mobile Selected Block Inspector Drawer */}
           {showRightInspector && (
             <div className="md:hidden">
-              <div className="fixed inset-0 z-50 flex justify-end">
+              <div
+                className="fixed inset-0 z-50 flex justify-end"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Block details inspector"
+              >
                 <div
                   className="fixed inset-0 bg-black/75 backdrop-blur-xs"
                   onClick={() => {
@@ -570,6 +660,39 @@ export function WorkspaceShell() {
         onClose={() => setIsGitHubModalOpen(false)}
         onSessionChange={(info) => setGithubSession(info)}
       />
+
+      {/* Multi-Target Audit & Iterative Autofix Modal */}
+      <AuditAutofixModal />
+
+      {/* Add & Attach Project Images Modal */}
+      <AddImageModal />
+
+      {/* Image / Media Feedback Toast */}
+      {imageFeedback && (
+        <div
+          role="status"
+          className={`fixed bottom-28 md:bottom-14 right-3.5 z-[60] max-w-md glass-menu border rounded-lg px-3.5 py-2.5 flex items-center gap-2.5 font-mono text-xs shadow-2xl animate-panel-in ${
+            imageFeedback.type === 'error'
+              ? 'border-red-500/70 text-red-100'
+              : 'border-emerald-500/60 text-zinc-100'
+          }`}
+        >
+          {imageFeedback.type === 'error' ? (
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span className="leading-snug">{imageFeedback.message}</span>
+          <button
+            type="button"
+            onClick={clearImageFeedback}
+            className="text-zinc-400 hover:text-white p-0.5 rounded cursor-pointer shrink-0"
+            aria-label="Dismiss notification"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

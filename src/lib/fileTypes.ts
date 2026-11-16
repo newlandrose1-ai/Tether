@@ -98,6 +98,7 @@ export function getFileTypeInfo(options: {
   language?: string;
 }): FileTypeInfo {
   const { title, kind, mimeType = '', binary = false, isPdf = false, language } = options;
+  const baseName = (title.trim().split('/').pop() || title.trim()).toLowerCase();
   const ext = getExtension(title);
   const mime = mimeType.toLowerCase();
 
@@ -124,6 +125,30 @@ export function getFileTypeInfo(options: {
       language: opts?.lang ?? language,
     };
   };
+
+  if (baseName === '.gitignore' || baseName === '.gitattributes' || baseName === '.gitkeep') {
+    return build('GIT', 'Git Config', 'data', 'code', {
+      hasRenderedPreview: false,
+      isTextEditable: true,
+      lang: 'text',
+    });
+  }
+
+  if (baseName === 'license' || baseName === 'notice' || baseName === 'authors') {
+    return build('LIC', 'License / Legal', 'doc', 'code', {
+      hasRenderedPreview: false,
+      isTextEditable: true,
+      lang: 'text',
+    });
+  }
+
+  if (baseName === 'dockerfile' || baseName === 'makefile' || baseName === 'procfile') {
+    return build('CONF', 'Build Config', 'data', 'code', {
+      hasRenderedPreview: false,
+      isTextEditable: true,
+      lang: 'text',
+    });
+  }
 
   if (kind === 'upload' || ext === 'zip' || mime === 'application/zip') {
     return build('ZIP', 'ZIP Archive', 'archive', 'archive', {

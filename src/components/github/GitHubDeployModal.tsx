@@ -286,6 +286,18 @@ function GitHubDeployModalContent({
     return () => window.removeEventListener('message', handleMessage);
   }, [refreshSession]);
 
+  // Close modal on Escape
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [onClose]);
+
   const filteredRepos = useMemo(() => {
     const q = repoSearch.trim().toLowerCase();
     if (!q) return repos;
@@ -458,9 +470,13 @@ function GitHubDeployModalContent({
 
   const handleCopyCallback = async () => {
     if (!session?.callbackUrl) return;
-    await navigator.clipboard.writeText(session.callbackUrl);
-    setCopiedCallback(true);
-    setTimeout(() => setCopiedCallback(false), 1800);
+    try {
+      await navigator.clipboard.writeText(session.callbackUrl);
+      setCopiedCallback(true);
+      setTimeout(() => setCopiedCallback(false), 1800);
+    } catch {
+      // Clipboard access may be blocked in restricted iframe contexts
+    }
   };
 
   const branchExists = branches.some((b) => b.name === targetBranch.trim());

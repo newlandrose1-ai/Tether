@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { memo, useState } from 'react';
 import type { Block, FileBlockData, CodeBlockData } from '../../types/model';
 import { getFileTypeInfo } from '../../lib/fileTypes';
 import {
@@ -22,6 +22,7 @@ import {
   Film,
   Binary,
   Globe,
+  ShieldCheck,
 } from 'lucide-react';
 
 export interface TreeNodeItem {
@@ -46,6 +47,8 @@ interface FileTreeNodeProps {
   onDuplicate: (block: Block) => void;
   onDelete: (block: Block) => void;
   onCreateFileInFolder?: (folderPath: string) => void;
+  onAuditFolder?: (folderPath: string) => void;
+  onAuditFile?: (blockId: string) => void;
 }
 
 /**
@@ -79,7 +82,7 @@ function HighlightMatch({ text, query }: { text: string; query?: string }) {
   );
 }
 
-export function FileTreeNode({
+export const FileTreeNode = memo(function FileTreeNode({
   item,
   level,
   activeId,
@@ -92,8 +95,22 @@ export function FileTreeNode({
   onDuplicate,
   onDelete,
   onCreateFileInFolder,
+  onAuditFolder,
+  onAuditFile,
 }: FileTreeNodeProps) {
   const [showMenu, setShowMenu] = useState(false);
+
+  React.useEffect(() => {
+    if (!showMenu) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setShowMenu(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [showMenu]);
 
   const isOpen = expandedFolders.has(item.path);
   const isSelected = item.block?.id === activeId;
@@ -155,6 +172,12 @@ export function FileTreeNode({
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();
               onToggleFolder(item.path);
+            } else if (e.key === 'ArrowRight' && !isOpen) {
+              e.preventDefault();
+              onToggleFolder(item.path);
+            } else if (e.key === 'ArrowLeft' && isOpen) {
+              e.preventDefault();
+              onToggleFolder(item.path);
             }
           }}
           style={{ paddingLeft: `${indentPx}px` }}
@@ -191,21 +214,37 @@ export function FileTreeNode({
             </span>
           </div>
 
-          {/* Quick Action: New file in folder */}
-          {onCreateFileInFolder && (
+          {/* Quick Actions: Audit folder & New file in folder */}
+          {(onCreateFileInFolder || onAuditFolder) && (
             <div className="opacity-80 sm:opacity-0 group-hover:opacity-100 flex items-center gap-0.5 transition-opacity">
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onCreateFileInFolder(item.path);
-                }}
-                className="w-8 h-8 sm:w-6 sm:h-6 flex items-center justify-center hover:text-zinc-100 hover:bg-zinc-700/60 rounded text-zinc-400 transition cursor-pointer"
-                title={`New file in ${item.name}`}
-                aria-label={`New file in ${item.name}`}
-              >
-                <FilePlus className="w-3.5 h-3.5 sm:w-3 sm:h-3" />
-              </button>
+              {onAuditFolder && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onAuditFolder(item.path);
+                  }}
+                  className="w-8 h-8 sm:w-6 sm:h-6 flex items-center justify-center hover:text-orange-300 hover:bg-orange-500/15 rounded text-zinc-400 transition cursor-pointer"
+                  title={`Audit folder ${item.name}`}
+                  aria-label={`Audit folder ${item.name}`}
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 sm:w-3 sm:h-3" />
+                </button>
+              )}
+              {onCreateFileInFolder && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCreateFileInFolder(item.path);
+                  }}
+                  className="w-8 h-8 sm:w-6 sm:h-6 flex items-center justify-center hover:text-zinc-100 hover:bg-zinc-700/60 rounded text-zinc-400 transition cursor-pointer"
+                  title={`New file in ${item.name}`}
+                  aria-label={`New file in ${item.name}`}
+                >
+                  <FilePlus className="w-3.5 h-3.5 sm:w-3 sm:h-3" />
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -228,6 +267,8 @@ export function FileTreeNode({
                 onDuplicate={onDuplicate}
                 onDelete={onDelete}
                 onCreateFileInFolder={onCreateFileInFolder}
+                onAuditFolder={onAuditFolder}
+                onAuditFile={onAuditFile}
               />
             ))}
           </div>
@@ -283,12 +324,20 @@ export function FileTreeNode({
           </span>
         )}
         {item.block?.lastAuditStatus === 'failed' && (
-          <span className="text-[10px] font-mono text-red-400 flex-shrink-0" title="Audit errors">
+          <span
+            className="text-[10px] font-mono text-red-400 flex-shrink-0"
+            title="Audit errors"
+            aria-label="Audit errors"
+          >
             !
           </span>
         )}
         {item.block?.copiedFromBlockId && item.block?.lastAuditStatus !== 'failed' && (
-          <span className="text-[10px] font-mono text-amber-400 flex-shrink-0" title="Copied draft">
+          <span
+            className="text-[10px] font-mono text-amber-400 flex-shrink-0"
+            title="Copied draft"
+            aria-label="Copied draft"
+          >
             copy
           </span>
         )}
@@ -305,6 +354,8 @@ export function FileTreeNode({
             className="w-8 h-8 sm:w-6 sm:h-6 flex items-center justify-center text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/60 rounded transition cursor-pointer"
             title="File actions"
             aria-label="File actions"
+            aria-expanded={showMenu}
+            aria-haspopup="menu"
           >
             <MoreVertical className="w-3.5 h-3.5" />
           </button>
@@ -315,7 +366,11 @@ export function FileTreeNode({
                 className="fixed inset-0 z-40"
                 onClick={() => setShowMenu(false)}
               />
-              <div className="absolute right-0 top-7 z-50 w-44 glass-menu border border-zinc-600/80 rounded-lg py-1 text-xs font-mono text-zinc-300 animate-panel-in">
+              <div
+                role="menu"
+                aria-label={`Actions for ${item.name}`}
+                className="absolute right-0 top-7 z-50 w-44 glass-menu border border-zinc-600/80 rounded-lg py-1 text-xs font-mono text-zinc-300 animate-panel-in"
+              >
                 {onEdit && (
                   <button
                     type="button"
@@ -327,6 +382,19 @@ export function FileTreeNode({
                   >
                     <FileCode className="w-3.5 h-3.5 text-orange-400" />
                     <span>{fileInfo?.isTextEditable ? 'Open Editor' : 'Open Viewer'}</span>
+                  </button>
+                )}
+                {fileInfo?.isTextEditable !== false && onAuditFile && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowMenu(false);
+                      if (item.block) onAuditFile(item.block.id);
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 min-h-[38px] hover:bg-orange-500/15 hover:text-zinc-100 text-left transition cursor-pointer"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5 text-orange-400" />
+                    <span>Audit &amp; Autofix</span>
                   </button>
                 )}
                 {fileInfo?.isTextEditable !== false && (
@@ -372,4 +440,4 @@ export function FileTreeNode({
       )}
     </div>
   );
-}
+});

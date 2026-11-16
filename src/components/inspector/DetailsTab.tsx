@@ -4,10 +4,6 @@ import React from 'react';
 import type { Block, CodeBlockData, FileBlockData, TextBlockData } from '../../types/model';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import {
-  Clock,
-  HardDrive,
-  FileCode,
-  Tag,
   GitCommit,
   Download,
   ArrowRight,
@@ -15,6 +11,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { exportSingleBlock } from '../../lib/exportImport';
+import { countLinesFast, utf8ByteLength } from '../../lib/tetherFolderSync';
 
 interface DetailsTabProps {
   block: Block;
@@ -35,7 +32,7 @@ export function DetailsTab({ block }: DetailsTabProps) {
       ? (block.data as TextBlockData)?.content || ''
       : (block.data as FileBlockData)?.content || '';
 
-  const path = (block.data as { path?: string })?.path || block.title;
+  const path = block.sourcePath || (block.data as { path?: string })?.path || block.title;
   const language = (block.data as { language?: string })?.language || 'text';
 
   // Extract import dependencies
@@ -75,11 +72,30 @@ export function DetailsTab({ block }: DetailsTabProps) {
         </div>
 
         <div className="flex justify-between items-center text-zinc-400">
+          <span>Folder Tree</span>
+          <span className={block.isInFolderStructure ? 'text-orange-300' : 'text-zinc-500'}>
+            {block.isInFolderStructure ? 'Synced' : 'Untethered'}
+          </span>
+        </div>
+
+        <div className="flex justify-between items-center text-zinc-400">
           <span>Path</span>
           <span className="text-zinc-200 truncate max-w-[160px]" title={path}>
             {path}
           </span>
         </div>
+
+        {block.originalSourcePath && block.originalSourcePath !== path && (
+          <div className="flex justify-between items-center text-zinc-400">
+            <span>Original Path</span>
+            <span
+              className="text-zinc-400 truncate max-w-[160px]"
+              title={block.originalSourcePath}
+            >
+              {block.originalSourcePath}
+            </span>
+          </div>
+        )}
 
         <div className="flex justify-between items-center text-zinc-400">
           <span>Language</span>
@@ -88,12 +104,12 @@ export function DetailsTab({ block }: DetailsTabProps) {
 
         <div className="flex justify-between items-center text-zinc-400">
           <span>Size</span>
-          <span className="text-zinc-200">{formatSize(new Blob([content]).size)}</span>
+          <span className="text-zinc-200">{formatSize(utf8ByteLength(content))}</span>
         </div>
 
         <div className="flex justify-between items-center text-zinc-400">
           <span>Lines</span>
-          <span className="text-zinc-200">{content.split('\n').length} lines</span>
+          <span className="text-zinc-200">{countLinesFast(content)} lines</span>
         </div>
 
         <div className="flex justify-between items-center text-zinc-400">

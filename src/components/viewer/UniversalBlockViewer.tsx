@@ -13,6 +13,7 @@ import {
   getFileTypeInfo,
   parseCsvRows,
 } from '../../lib/fileTypes';
+import { resolveHtmlPreviewLocalAssets } from '../../lib/imageAssets';
 import {
   Binary,
   Download,
@@ -317,6 +318,10 @@ export function UniversalBlockViewer({
 
   // 1. HTML Live Rendered Page
   if (info.viewerKind === 'html') {
+    const htmlPath = block.sourcePath || fileData?.path || codeData?.path || block.title;
+    const resolvedHtml = effectiveContent
+      ? resolveHtmlPreviewLocalAssets(effectiveContent, htmlPath, allBlocks)
+      : '';
     return (
       <div className="flex-1 flex flex-col h-full bg-[#090B0E] overflow-hidden">
         <div className="px-3 py-1.5 bg-zinc-900/80 border-b border-zinc-700/75 flex items-center justify-between text-[11px] font-mono text-zinc-400 shrink-0">
@@ -333,7 +338,7 @@ export function UniversalBlockViewer({
           <iframe
             title={block.title}
             sandbox="allow-scripts"
-            srcDoc={effectiveContent || '<p style="font-family:sans-serif;color:#666;padding:16px;">Empty HTML document</p>'}
+            srcDoc={resolvedHtml || '<p style="font-family:sans-serif;color:#666;padding:16px;">Empty HTML document</p>'}
             className="w-full h-full bg-white rounded-md border border-zinc-700/80"
           />
         </div>

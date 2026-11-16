@@ -19,9 +19,26 @@ import {
   PanelRightClose,
   ChevronDown,
   ChevronRight,
+  RotateCcw,
+  ImagePlus,
+  FolderInput,
+  Link2,
 } from 'lucide-react';
 import type { TextBlockData } from '../../types/model';
 import { getFileTypeInfo, formatFileSize } from '../../lib/fileTypes';
+import {
+  PROJECT_CATEGORIES,
+  PROJECT_CATEGORY_GROUP_LABELS,
+  getProjectCategoryById,
+  extractBlockTextContent,
+  type ProjectCategoryGroup,
+} from '../../lib/projectCategories';
+import {
+  MEDIA_FOLDER_PRESETS,
+  getImageBlockPreviewSrc,
+  isImageBlock,
+  sanitizeFolderPath,
+} from '../../lib/imageAssets';
 
 export function BlockInspector() {
   const selectedBlockId = useWorkspaceStore((s) => s.selectedBlockId);
@@ -34,10 +51,16 @@ export function BlockInspector() {
   const openBlockInEditor = useWorkspaceStore((s) => s.openBlockInEditor);
   const copyBlockForEdit = useWorkspaceStore((s) => s.copyBlockForEdit);
   const toggleBlockInspector = useWorkspaceStore((s) => s.toggleBlockInspector);
+  const applyBlockProjectCategory = useWorkspaceStore((s) => s.applyBlockProjectCategory);
+  const openImageModal = useWorkspaceStore((s) => s.openImageModal);
+  const moveOrRenameAssetBlock = useWorkspaceStore((s) => s.moveOrRenameAssetBlock);
+  const setImageFeedback = useWorkspaceStore((s) => s.setImageFeedback);
 
-  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [editingTitleBlockId, setEditingTitleBlockId] = useState<string | null>(null);
   const [editedTitle, setEditedTitle] = useState('');
-  const [confirmDeleteBlock, setConfirmDeleteBlock] = useState(false);
+  const [editingPathBlockId, setEditingPathBlockId] = useState<string | null>(null);
+  const [editedPath, setEditedPath] = useState('');
+  const [confirmDeleteBlockId, setConfirmDeleteBlockId] = useState<string | null>(null);
   const [openSections, setOpenSections] = useState({
     metadata: true,
     tethers: true,
@@ -80,11 +103,39 @@ export function BlockInspector() {
   const outgoingTethers = tethers.filter((t) => t.sourceBlockId === block.id);
   const totalTethersCount = incomingTethers.length + outgoingTethers.length;
 
+  const activeCategory = getProjectCategoryById(block.projectCategory);
+  const currentBlockText = extractBlockTextContent(block);
+  const showResetTemplateButton = Boolean(
+    activeCategory &&
+      !blockData.binary &&
+      currentBlockText.trim().length > 0 &&
+      currentBlockText.trim() !== activeCategory.template.trim()
+  );
+
+  const isImageAsset = isImageBlock(block);
+  const imagePreviewSrc = isImageAsset ? getImageBlockPreviewSrc(block) : undefined;
+  const currentAssetPath = (resolvedPath || block.title).replace(/^\/+/, '');
+  const currentAssetFolder = currentAssetPath.includes('/')
+    ? currentAssetPath.split('/').slice(0, -1).join('/')
+    : '';
+
+  const isEditingTitle = editingTitleBlockId === block.id;
+  const isEditingPath = editingPathBlockId === block.id;
+  const confirmDeleteBlock = confirmDeleteBlockId === block.id;
+
   const handleSaveTitle = async () => {
     if (editedTitle.trim()) {
       await updateBlock(block.id, { title: editedTitle.trim() });
     }
-    setIsEditingTitle(false);
+    setEditingTitleBlockId(null);
+  };
+
+  const handleSaveAssetPath = async (nextFullPath: string) => {
+    const moved = await moveOrRenameAssetBlock(block.id, nextFullPath);
+    setEditingPathBlockId(null);
+    if (moved) {
+      setImageFeedback(`Moved ${moved.title} to ${moved.sourcePath || moved.title}`);
+    }
   };
 
   const formatDate = (timestamp: number) => {
@@ -162,22 +213,23 @@ export function BlockInspector() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 pb-20 md:pb-6 space-y-4">
+      <div className="flex-1 overflow-y-auto p-4 pb-28 md:pb-14 space-y-4">
         {/* Block Title */}
         <div>
-          <label className="text-[10px] font-mono tracking-wider text-zinc-500 uppercase block mb-1">
+          <span className="text-[10px] font-mono tracking-wider text-zinc-400 uppercase block mb-1">
             Title
-          </label>
+          </span>
           {isEditingTitle ? (
             <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5">
               <input
                 type="text"
                 autoFocus
+                aria-label="Block title"
                 value={editedTitle}
                 onChange={(e) => setEditedTitle(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') handleSaveTitle();
-                  if (e.key === 'Escape') setIsEditingTitle(false);
+                  if (e.key === 'Escape') setEditingTitleBlockId(null);
                 }}
                 className="w-full bg-transparent text-base sm:text-xs text-zinc-100 outline-none font-mono py-0.5"
               />
@@ -192,7 +244,7 @@ export function BlockInspector() {
               </button>
               <button
                 type="button"
-                onClick={() => setIsEditingTitle(false)}
+                onClick={() => setEditingTitleBlockId(null)}
                 className="w-8 h-8 flex items-center justify-center text-zinc-400 hover:text-zinc-300 rounded cursor-pointer"
                 title="Cancel"
                 aria-label="Cancel"
@@ -201,18 +253,69 @@ export function BlockInspector() {
               </button>
             </div>
           ) : (
-            <div
+            <button
+              type="button"
               onClick={() => {
                 setEditedTitle(block.title);
-                setIsEditingTitle(true);
+                setEditingTitleBlockId(block.id);
               }}
-              className="text-xs text-zinc-200 bg-zinc-900/60 border border-zinc-800/80 hover:border-zinc-700 rounded px-2.5 py-1.5 cursor-pointer truncate"
-              title="Click to rename block"
+              className="group/title w-full flex items-center justify-between gap-2 text-left text-xs text-zinc-100 bg-zinc-900/60 border border-zinc-800/80 hover:border-orange-500/50 rounded px-2.5 py-1.5 cursor-pointer transition"
+              title="Rename block"
+              aria-label={`Rename block ${block.title}`}
             >
-              {block.title}
-            </div>
+              <span className="truncate">{block.title}</span>
+              <Edit3 className="w-3 h-3 text-zinc-500 group-hover/title:text-orange-400 group-focus-visible/title:text-orange-400 shrink-0 transition-colors" />
+            </button>
           )}
         </div>
+
+        {/* Image Asset Preview & Quick Attach Controls */}
+        {isImageAsset ? (
+          <div className="p-2.5 rounded-lg bg-zinc-900/70 border border-zinc-700/75 space-y-2">
+            {imagePreviewSrc && (
+              <button
+                type="button"
+                onClick={() => openBlockInEditor(block.id)}
+                className="h-28 w-full rounded bg-zinc-950 border border-zinc-800 flex items-center justify-center overflow-hidden cursor-pointer hover:border-orange-500/60 transition"
+                title="Open full image viewer"
+                aria-label={`Open full image viewer for ${block.title}`}
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={imagePreviewSrc}
+                  alt={block.title}
+                  className="max-h-full max-w-full object-contain"
+                />
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() =>
+                openImageModal({
+                  initialTab: 'existing',
+                  preselectedImageIds: [block.id],
+                })
+              }
+              className="w-full flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded bg-orange-500/15 hover:bg-orange-500/25 border border-orange-500/50 text-orange-100 text-xs font-mono transition cursor-pointer"
+            >
+              <Link2 className="w-3.5 h-3.5 text-orange-400" />
+              <span>Insert / Attach to Code Block...</span>
+            </button>
+          </div>
+        ) : (
+          fileInfo.isTextEditable &&
+          block.kind !== 'upload' && (
+            <button
+              type="button"
+              onClick={() => openImageModal({ targetCodeBlockId: block.id })}
+              className="w-full flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded bg-zinc-900/80 hover:bg-orange-500/15 border border-zinc-700/80 hover:border-orange-500/50 text-zinc-200 hover:text-orange-100 text-xs font-mono transition cursor-pointer"
+            >
+              <ImagePlus className="w-3.5 h-3.5 text-orange-400" />
+              <span>+ Attach Image / Favicon / Gallery</span>
+            </button>
+          )
+        )}
 
         {/* Metadata Section (Collapsible) */}
         <div className="border-y border-zinc-700/65 py-2.5">
@@ -231,7 +334,64 @@ export function BlockInspector() {
           </button>
 
           {openSections.metadata && (
-            <div className="space-y-2 pt-2.5 text-xs font-mono">
+            <div className="space-y-2.5 pt-2.5 text-xs font-mono">
+              {block.kind !== 'upload' && (
+                <div className="space-y-1.5 pb-2 border-b border-zinc-800/80">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="block-project-category-select"
+                      className="text-[10px] uppercase tracking-wider text-zinc-400"
+                    >
+                      Project Category
+                    </label>
+                    {showResetTemplateButton && activeCategory && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void applyBlockProjectCategory(block.id, activeCategory.id, {
+                            applyTemplateIfNonEmpty: true,
+                          });
+                        }}
+                        className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-orange-300 hover:text-orange-100 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/40 rounded transition cursor-pointer"
+                        title="Replace current content with starter template"
+                      >
+                        <RotateCcw className="w-2.5 h-2.5" />
+                        <span>Reset Template</span>
+                      </button>
+                    )}
+                  </div>
+                  <select
+                    id="block-project-category-select"
+                    value={block.projectCategory || ''}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (!val) {
+                        void updateBlock(block.id, { projectCategory: undefined });
+                      } else {
+                        void applyBlockProjectCategory(block.id, val);
+                      }
+                    }}
+                    className="w-full bg-zinc-900/90 border border-zinc-700/80 hover:border-orange-500/60 focus:border-orange-500 rounded px-2 py-1.5 text-[11px] text-zinc-100 outline-none cursor-pointer"
+                  >
+                    <option value="">Custom / Unassigned</option>
+                    {(['docs', 'deps', 'entry', 'folders', 'media'] as ProjectCategoryGroup[]).map((grp) => (
+                      <optgroup key={grp} label={PROJECT_CATEGORY_GROUP_LABELS[grp]}>
+                        {PROJECT_CATEGORIES.filter((c) => c.group === grp).map((cat) => (
+                          <option key={cat.id} value={cat.id}>
+                            {cat.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                  {activeCategory && (
+                    <p className="text-[10px] text-zinc-400 leading-snug">
+                      {activeCategory.description}
+                    </p>
+                  )}
+                </div>
+              )}
+
               <div className="flex justify-between items-center text-zinc-400 gap-2">
                 <span>Format</span>
                 <span className="flex items-center gap-1.5 text-zinc-200">
@@ -244,11 +404,113 @@ export function BlockInspector() {
                 </span>
               </div>
 
-              {resolvedPath && resolvedPath !== block.title && (
+              <div className="flex justify-between items-center text-zinc-400 gap-2">
+                <span className="shrink-0">Tree Sync</span>
+                {block.isInFolderStructure ? (
+                  <span className="text-orange-300 truncate text-[11px]">
+                    {block.tetherParentId
+                      ? `Synced under ${
+                          blocks.find((b) => b.id === block.tetherParentId)?.title || 'parent'
+                        }`
+                      : 'Synced root in Folder Tree'}
+                  </span>
+                ) : (
+                  <span className="text-zinc-400 text-[11px]">Untethered (canvas only)</span>
+                )}
+              </div>
+
+              {block.kind !== 'upload' && (
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex justify-between items-center text-zinc-400 gap-2">
+                    <span className="flex items-center gap-1 shrink-0">
+                      <FolderInput className="w-3 h-3 text-orange-400" />
+                      <span>Path</span>
+                    </span>
+                    {!isEditingPath ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditedPath(currentAssetPath);
+                          setEditingPathBlockId(block.id);
+                        }}
+                        className="text-zinc-200 hover:text-orange-300 truncate text-[11px] underline decoration-dotted underline-offset-2 cursor-pointer"
+                        title="Click to move folder or rename path"
+                      >
+                        {currentAssetPath}
+                      </button>
+                    ) : null}
+                  </div>
+
+                  {isEditingPath && (
+                    <div className="space-y-1.5 p-2 rounded bg-zinc-950/80 border border-zinc-700/80">
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="text"
+                          autoFocus
+                          aria-label="Block file path"
+                          value={editedPath}
+                          onChange={(e) => setEditedPath(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') void handleSaveAssetPath(editedPath);
+                            if (e.key === 'Escape') setEditingPathBlockId(null);
+                          }}
+                          className="w-full bg-zinc-900 border border-zinc-700 focus:border-orange-500 rounded px-2 py-1 text-[11px] text-zinc-100 outline-none"
+                          placeholder="e.g. assets/images/hero.png"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => void handleSaveAssetPath(editedPath)}
+                          className="p-1 text-emerald-400 hover:text-emerald-300 cursor-pointer"
+                          title="Move / Save path"
+                          aria-label="Save path"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingPathBlockId(null)}
+                          className="p-1 text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                          title="Cancel"
+                          aria-label="Cancel path edit"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      {isImageAsset && (
+                        <div className="flex flex-wrap gap-1">
+                          {MEDIA_FOLDER_PRESETS.slice(0, 6).map((preset) => {
+                            const leaf = block.title;
+                            const target = preset.value ? `${preset.value}/${leaf}` : leaf;
+                            return (
+                              <button
+                                key={preset.label}
+                                type="button"
+                                onClick={() => setEditedPath(target)}
+                                className={`px-1.5 py-0.5 rounded text-[9px] border cursor-pointer ${
+                                  sanitizeFolderPath(currentAssetFolder) === preset.value
+                                    ? 'bg-orange-500/20 border-orange-500/50 text-orange-200'
+                                    : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200'
+                                }`}
+                              >
+                                {preset.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {block.originalSourcePath && block.originalSourcePath !== resolvedPath && (
                 <div className="flex justify-between items-center text-zinc-400 gap-2">
-                  <span className="shrink-0">Path</span>
-                  <span className="text-zinc-300 truncate text-[11px]" title={resolvedPath}>
-                    {resolvedPath}
+                  <span className="shrink-0">Origin</span>
+                  <span
+                    className="text-zinc-400 truncate text-[11px]"
+                    title={block.originalSourcePath}
+                  >
+                    {block.originalSourcePath}
                   </span>
                 </div>
               )}
@@ -480,11 +742,11 @@ export function BlockInspector() {
                 <span>Download {fileInfo.badge} File</span>
               </a>
             ) : block.kind === 'upload' ? (
-              <div className="text-[11px] font-mono text-zinc-500 italic">
+              <div className="text-[11px] font-mono text-zinc-400 italic">
                 Open Viewer to browse or inspect individual extracted files.
               </div>
             ) : block.kind === 'file' && blockData.binary ? (
-              <div className="text-[11px] font-mono text-zinc-500 italic">
+              <div className="text-[11px] font-mono text-zinc-400 italic">
                 Binary payload unavailable for text export.
               </div>
             ) : (
@@ -531,7 +793,7 @@ export function BlockInspector() {
                     type="button"
                     onClick={async () => {
                       await deleteBlock(block.id);
-                      setConfirmDeleteBlock(false);
+                      setConfirmDeleteBlockId(null);
                     }}
                     className="px-2.5 py-1 bg-red-800 hover:bg-red-700 text-red-100 rounded text-xs font-medium cursor-pointer"
                   >
@@ -539,7 +801,7 @@ export function BlockInspector() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setConfirmDeleteBlock(false)}
+                    onClick={() => setConfirmDeleteBlockId(null)}
                     className="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-xs cursor-pointer"
                   >
                     Cancel
@@ -549,7 +811,7 @@ export function BlockInspector() {
             ) : (
               <button
                 type="button"
-                onClick={() => setConfirmDeleteBlock(true)}
+                onClick={() => setConfirmDeleteBlockId(block.id)}
                 className="w-full flex items-center justify-center gap-2 py-1.5 px-3 bg-red-950/30 hover:bg-red-900/40 border border-red-900/60 text-red-400 hover:text-red-300 rounded text-xs transition cursor-pointer"
               >
                 <Trash2 className="w-3.5 h-3.5" />

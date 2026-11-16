@@ -49,18 +49,18 @@ export const TetherEdge = memo(function TetherEdge({
   const dimFactor = hasSelection && !isActive ? 0.38 : 1;
 
   const outerGlowColor = isActive
-    ? 'rgba(249, 115, 22, 0.46)'
+    ? 'rgba(249, 115, 22, 0.30)'
     : isCopiedFrom
-    ? 'rgba(251, 146, 60, 0.30)'
+    ? 'rgba(251, 146, 60, 0.22)'
+    : hasSelection
+    ? 'rgba(249, 115, 22, 0.08)'
+    : 'rgba(249, 115, 22, 0.14)';
+
+  const innerGlowColor = isActive
+    ? 'rgba(251, 146, 60, 0.36)'
     : hasSelection
     ? 'rgba(249, 115, 22, 0.10)'
     : 'rgba(249, 115, 22, 0.22)';
-
-  const innerGlowColor = isActive
-    ? 'rgba(251, 146, 60, 0.34)'
-    : hasSelection
-    ? 'rgba(249, 115, 22, 0.08)'
-    : 'rgba(249, 115, 22, 0.16)';
 
   const strokeStyle: React.CSSProperties = {
     ...style,
@@ -81,15 +81,14 @@ export const TetherEdge = memo(function TetherEdge({
 
   return (
     <>
-      {/* Faint Orange Outer Ambient Glow */}
+      {/* Zero-filter Faint Orange Outer Ambient Glow */}
       <path
         d={edgePath}
         fill="none"
         stroke={outerGlowColor}
-        strokeWidth={isActive ? 10 : 7}
+        strokeWidth={isActive ? 11 : 8}
         strokeLinecap="round"
         style={{
-          filter: 'blur(3.5px)',
           pointerEvents: 'none',
           transition: 'stroke 150ms ease, stroke-width 150ms ease',
         }}
@@ -99,7 +98,7 @@ export const TetherEdge = memo(function TetherEdge({
         d={edgePath}
         fill="none"
         stroke={innerGlowColor}
-        strokeWidth={isActive ? 4.5 : 3.25}
+        strokeWidth={isActive ? 5 : 3.5}
         strokeLinecap="round"
         style={{
           pointerEvents: 'none',

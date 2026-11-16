@@ -2,7 +2,7 @@
 
 import React, { memo } from 'react';
 import type { NodeProps } from 'reactflow';
-import { Folder, FolderOpen, ChevronDown, ChevronRight } from 'lucide-react';
+import { Folder, FolderOpen, ChevronDown, ChevronRight, ShieldCheck } from 'lucide-react';
 import { useWorkspaceStore } from '../store/workspaceStore';
 
 export interface FolderNodeData {
@@ -17,7 +17,7 @@ export const FolderNode = memo(function FolderNode({
   data,
 }: NodeProps<FolderNodeData>) {
   const updateBlockData = useWorkspaceStore((s) => s.updateBlockData);
-  const blocks = useWorkspaceStore((s) => s.blocks);
+  const openAuditModal = useWorkspaceStore((s) => s.openAuditModal);
 
   const { folderPath, isExpanded, fileCount, uploadBlockId, onToggleFolder } = data;
 
@@ -30,7 +30,7 @@ export const FolderNode = memo(function FolderNode({
     }
 
     if (uploadBlockId) {
-      const uploadBlock = blocks.find((b) => b.id === uploadBlockId);
+      const uploadBlock = useWorkspaceStore.getState().blocks.find((b) => b.id === uploadBlockId);
       if (!uploadBlock || uploadBlock.kind !== 'upload') return;
 
       const uploadData = uploadBlock.data as {
@@ -100,15 +100,30 @@ export const FolderNode = memo(function FolderNode({
         </span>
       </div>
 
-      <span
-        className={`text-[10px] px-2 py-0.5 rounded border shrink-0 font-semibold tabular-nums transition-colors ${
-          isExpanded
-            ? 'text-zinc-300 bg-zinc-900/80 border-zinc-700/80'
-            : 'text-orange-300 bg-orange-500/15 border-orange-500/45'
-        }`}
-      >
-        {isExpanded ? `${fileCount} open` : `${fileCount} hidden`}
-      </span>
+      <div className="flex items-center gap-1.5 shrink-0">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            openAuditModal({ targetType: 'folder', folderPath });
+          }}
+          className="w-6 h-6 flex items-center justify-center rounded bg-zinc-900/75 hover:bg-orange-500/20 border border-zinc-700/80 hover:border-orange-500/60 text-zinc-400 hover:text-orange-300 transition cursor-pointer"
+          title={`Audit folder ${folderPath}/`}
+          aria-label={`Audit folder ${folderPath}`}
+        >
+          <ShieldCheck className="w-3.5 h-3.5" />
+        </button>
+
+        <span
+          className={`text-[10px] px-2 py-0.5 rounded border shrink-0 font-semibold tabular-nums transition-colors ${
+            isExpanded
+              ? 'text-zinc-300 bg-zinc-900/80 border-zinc-700/80'
+              : 'text-orange-300 bg-orange-500/15 border-orange-500/45'
+          }`}
+        >
+          {isExpanded ? `${fileCount} open` : `${fileCount} hidden`}
+        </span>
+      </div>
     </div>
   );
 });
