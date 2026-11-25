@@ -1,0 +1,93 @@
+[
+  {
+    "license": "MIT",
+    "policy": "Allow",
+    "safe_for_saas_backend": "Yes",
+    "safe_to_inject": "Yes",
+    "action": "Keep copyright + licence notice; list in NOTICE."
+  },
+  {
+    "license": "Apache-2.0",
+    "policy": "Allow",
+    "safe_for_saas_backend": "Yes",
+    "safe_to_inject": "Yes",
+    "action": "Keep notices, document changes; patent grant. Not compatible with GPLv2-only."
+  },
+  {
+    "license": "ISC",
+    "policy": "Allow",
+    "safe_for_saas_backend": "Yes",
+    "safe_to_inject": "Yes",
+    "action": "Permissive, MIT-equivalent."
+  },
+  {
+    "license": "BSD-3-Clause",
+    "policy": "Allow",
+    "safe_for_saas_backend": "Yes",
+    "safe_to_inject": "Yes",
+    "action": "Permissive; keep notice."
+  },
+  {
+    "license": "BSD-2-Clause",
+    "policy": "Allow",
+    "safe_for_saas_backend": "Yes",
+    "safe_to_inject": "Yes",
+    "action": "Permissive; keep notice."
+  },
+  {
+    "license": "MIT OR GPL-3.0+",
+    "policy": "Allow",
+    "safe_for_saas_backend": "Yes",
+    "safe_to_inject": "Yes",
+    "action": "Dual licence (e.g. JSZip). Elect MIT and record that election."
+  },
+  {
+    "license": "LGPL-3.0",
+    "policy": "Warn",
+    "safe_for_saas_backend": "Yes",
+    "safe_to_inject": "Review",
+    "action": "Weak copyleft. Flag for human review; never auto-apply."
+  },
+  {
+    "license": "GPL-3.0",
+    "policy": "Block",
+    "safe_for_saas_backend": "Yes (internal run only)",
+    "safe_to_inject": "No",
+    "action": "Forces GPL onto combined deliverable. Only if the user's own project is GPL/AGPL."
+  },
+  {
+    "license": "AGPL-3.0",
+    "policy": "Block",
+    "safe_for_saas_backend": "High risk",
+    "safe_to_inject": "No",
+    "action": "Network use triggers source-sharing. Do not run modified AGPL tools as SaaS or inject into user zips."
+  },
+  {
+    "license": "Source-available",
+    "policy": "Block",
+    "safe_for_saas_backend": "No",
+    "safe_to_inject": "No",
+    "action": "e.g. Moderne Source Available (OpenRewrite JS/TS/Python/security recipes), Polyform Free Trial (OpenHands/enterprise)."
+  },
+  {
+    "license": "Commercial API terms",
+    "policy": "Block",
+    "safe_for_saas_backend": "Paid licence needed",
+    "safe_to_inject": "N/A",
+    "action": "e.g. @webcontainer/api. MIT helper repos do not grant rights to the API."
+  },
+  {
+    "license": "Unlicensed",
+    "policy": "Block",
+    "safe_for_saas_backend": "No",
+    "safe_to_inject": "No",
+    "action": "No LICENSE file = all rights reserved, even if README/package.json says MIT."
+  },
+  {
+    "license": "Not stated",
+    "policy": "Unverified",
+    "safe_for_saas_backend": "Unknown",
+    "safe_to_inject": "Unknown",
+    "action": "LLM research did not state a licence. Verifier must read SPDX from npm/GitHub API. Never auto-propose until resolved."
+  }
+]

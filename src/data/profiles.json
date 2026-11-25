@@ -1,0 +1,136 @@
+{
+  "version": "1.0.0",
+  "profiles": [
+    {
+      "id": "browser-game-2d",
+      "name": "Browser Game (2D)",
+      "description": "HTML5 Canvas, WebGL/WebGPU, or engine-driven 2D browser game (Phaser, PixiJS, KAPLAY/Kaboom, LittleJS, Godot HTML5 export).",
+      "evidence_rules": {
+        "dependencies": ["phaser", "pixi.js", "pixijs", "kaplay", "kaboom", "littlejsengine", "pygame", "kontra", "excalibur", "@dimforge/rapier2d", "planck", "matter-js", "howler", "zzfx"],
+        "entry_points": ["project.godot", "index.html"],
+        "config_files": ["project.godot"],
+        "asset_extensions": [".png", ".jpg", ".jpeg", ".webp", ".gif", ".wav", ".mp3", ".ogg", ".tmx", ".tmj", ".fnt", ".atlas"],
+        "asset_dirs": ["assets", "sprites", "audio", "sfx", "music", "tilemaps", "levels", "textures"],
+        "code_patterns": ["requestAnimationFrame", "getContext('2d')", "getContext(\"2d\")", "AudioContext", "webkitAudioContext", "Gamepad", "webgl", "Phaser.Game", "PIXI.Application", "new Application("],
+        "readme_keywords": ["game", "player", "score", "level", "controls", "wasd", "arcade", "canvas", "sprite"]
+      },
+      "completeness_checklist": [
+        { "id": "input-handler", "label": "Input handler (keyboard, pointer, gamepad)" },
+        { "id": "game-loop", "label": "Game loop with fixed timestep" },
+        { "id": "scene-state", "label": "Scene or game-state management" },
+        { "id": "asset-loader", "label": "Asset loader with boot progress" },
+        { "id": "audio-unlock", "label": "Audio playback with user-gesture unlock" },
+        { "id": "save-load", "label": "Save/load persistence (IndexedDB or localStorage)" },
+        { "id": "build-export", "label": "Build/export script for static distribution" },
+        { "id": "pause-resume", "label": "Pause/resume handling on blur or key press" },
+        { "id": "logic-tests", "label": "Unit tests for pure game logic" },
+        { "id": "readme-controls", "label": "README documenting controls and run steps" }
+      ],
+      "vertical_slice": ["input", "update", "render", "asset", "save"],
+      "verification_recipe": {
+        "static": "Parse all JS/TS files and check that referenced local asset paths exist in the archive.",
+        "future_backend": "Start dev/build server, load in headless browser, assert canvas present and zero console errors."
+      },
+      "registry_categories": [
+        "input handling",
+        "audio",
+        "physics",
+        "save/load",
+        "asset loading",
+        "UI/menus",
+        "build/bundling",
+        "testing"
+      ]
+    },
+    {
+      "id": "web-page",
+      "name": "Web Page / SPA",
+      "description": "Static site, landing page, or client-side Single Page Application (HTML/CSS/JS, React, Vue, Svelte, Preact, SolidJS, Astro) without a dedicated API backend.",
+      "evidence_rules": {
+        "dependencies": ["react", "react-dom", "vue", "svelte", "preact", "solid-js", "astro", "next", "tailwindcss", "@tailwindcss/vite"],
+        "entry_points": ["index.html", "src/App.tsx", "src/App.jsx", "src/main.tsx", "src/main.ts", "app/page.tsx"],
+        "config_files": ["manifest.json", "vite.config.ts", "vite.config.js", "astro.config.mjs", "svelte.config.js", "tailwind.config.js", "tailwind.config.ts"],
+        "asset_extensions": [".svg", ".ico", ".woff", ".woff2", ".png", ".jpg", ".webp"],
+        "asset_dirs": ["public", "styles", "css", "components", "pages"],
+        "code_patterns": ["document.querySelector", "customElements.define", "createRoot(", "ReactDOM", "createApp(", "media (max-width", "@import \"tailwindcss\""],
+        "readme_keywords": ["website", "web app", "landing", "frontend", "ui", "spa", "browser", "responsive"]
+      },
+      "completeness_checklist": [
+        { "id": "title-meta", "label": "<title> and meta description tags" },
+        { "id": "viewport-meta", "label": "Responsive viewport meta tag" },
+        { "id": "favicon", "label": "Favicon asset and link reference" },
+        { "id": "landmarks", "label": "Accessible semantic landmarks (header, main, nav)" },
+        { "id": "responsive-css", "label": "Responsive CSS rules or utility breakpoints" },
+        { "id": "pwa-manifest", "label": "Web manifest / service worker when PWA modifier is active" },
+        { "id": "build-tooling", "label": "Build tooling and scripts" },
+        { "id": "lint-config", "label": "Linter configuration" },
+        { "id": "tests", "label": "Component or end-to-end tests" },
+        { "id": "deploy-config", "label": "Deployment or static hosting configuration" },
+        { "id": "readme", "label": "README with setup and build instructions" }
+      ],
+      "vertical_slice": ["route/page", "component", "state", "data fetch", "test"],
+      "verification_recipe": {
+        "static": "Parse HTML/JSON/JS/TS and check static asset references resolve.",
+        "future_backend": "Serve built output in headless browser and verify zero console errors or failed requests."
+      },
+      "registry_categories": [
+        "build/bundling",
+        "testing",
+        "UI/menus"
+      ]
+    },
+    {
+      "id": "api-service",
+      "name": "API / Backend Service",
+      "description": "HTTP API, microservice, or backend server (Express, Fastify, Hono, NestJS, FastAPI, Flask, Django, Go, Rust).",
+      "evidence_rules": {
+        "dependencies": ["express", "fastify", "hono", "@nestjs/core", "koa", "fastapi", "flask", "django", "uvicorn", "starlette", "pydantic", "zod", "joi", "prisma", "drizzle-orm"],
+        "entry_points": ["server.ts", "server.js", "app.py", "main.py", "manage.py", "main.go", "src/main.rs"],
+        "config_files": ["Dockerfile", "docker-compose.yml", "docker-compose.yaml", "openapi.yaml", "openapi.json", "swagger.json"],
+        "asset_extensions": [".sql", ".prisma", ".proto"],
+        "asset_dirs": ["routes", "controllers", "services", "models", "migrations", "routers", "api"],
+        "code_patterns": ["app.get(", "app.post(", "router.get(", "router.post(", "FastAPI(", "@app.route(", "@Get(", "http.createServer", "/health", "express()"],
+        "readme_keywords": ["api", "endpoint", "rest", "graphql", "server", "backend", "database", "docker", "microservice"]
+      },
+      "completeness_checklist": [
+        { "id": "routes", "label": "Structured route handlers" },
+        { "id": "input-validation", "label": "Request input validation (Zod, Pydantic, etc.)" },
+        { "id": "auth", "label": "Authentication / authorization middleware" },
+        { "id": "logging", "label": "Structured request/application logging" },
+        { "id": "error-handling", "label": "Centralized error handling middleware" },
+        { "id": "data-layer", "label": "Data layer and migrations" },
+        { "id": "health-endpoint", "label": "Health check endpoint (/health or /healthz)" },
+        { "id": "tests", "label": "API / integration test suite" },
+        { "id": "env-example", "label": ".env.example documenting required environment variables" },
+        { "id": "openapi-docs", "label": "OpenAPI / Swagger specification" },
+        { "id": "ci-workflow", "label": "CI workflow configuration" }
+      ],
+      "vertical_slice": ["route", "handler", "service", "DB", "test"],
+      "verification_recipe": {
+        "static": "Parse JSON/JS/TS/route manifests and verify config and dependency declarations.",
+        "future_backend": "Boot service in isolated sandbox and probe the health endpoint."
+      },
+      "registry_categories": [
+        "testing",
+        "build/bundling"
+      ]
+    }
+  ],
+  "modifiers": [
+    {
+      "id": "pwa",
+      "name": "PWA",
+      "description": "Progressive Web App offline manifest, icons, and service worker support."
+    },
+    {
+      "id": "typescript",
+      "name": "TypeScript",
+      "description": "TypeScript compiler config and typed source modules."
+    },
+    {
+      "id": "docker",
+      "name": "Containerized",
+      "description": "Docker or container deployment configuration."
+    }
+  ]
+}

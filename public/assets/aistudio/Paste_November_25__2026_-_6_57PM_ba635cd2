@@ -1,0 +1,2056 @@
+# Zip Upgrader: Full Data Handover
+
+Generated 25 Nov 2026 from a design conversation and five LLM research batches. This is a handover for rebuilding an existing Google AI Studio app into **Zip Upgrader**. Paste or upload this file as context, then use the prompts in Section 12 one at a time.
+
+## 0. Read this first
+
+- **Nothing in the registry has been verified** against live npm, PyPI or GitHub. It is LLM-nominated data. Treat every licence marked `Not stated` as unresolved and never propose it.
+- Versions, benchmark numbers and "last activity" claims from the research were deliberately **left out** because they could not be trusted. Fill them from registry APIs at verify time.
+- The app runs in the browser (AI Studio). It **cannot** run `npm install`, builds or tests. Verification is limited to structural and static checks, and the UI must say so.
+- Sections 7 to 11 are data. Sections 1 to 6 and 12 to 14 are design and prompts.
+
+---
+
+## 1. Product definition
+
+**What it does:** the user uploads a zipped software project. The app works out what kind of project it is, finds gaps against what a finished project of that type normally has, proposes upgrades (libraries from a vetted registry, or generated files), lets the user approve them, applies them to a copy, checks the result, and returns an updated zip with a changelog.
+
+**Pipeline:**
+
+`Upload > Baseline analysis > Intent scan > Profile lock > Profile-specific findings > Proposals > User approves > Apply > Verify > Repackage`
+
+**Findings vs proposals** are separate lists:
+- *Finding:* what is wrong or missing (no tests, missing lockfile, no input handler).
+- *Proposal:* tied to one finding. States exact files added or changed, source (generated, registry library, reference repo), licence, risk tier, and expected effect.
+
+**Vertical slice:** one thin feature cut through every layer (UI, route, service, data, test, config). With a stated slice goal the app can trace the chain and report where it breaks. Without one, gap finding falls back to the profile checklist.
+
+---
+
+## 2. Layer 2: intent classification and profile lock
+
+A second scan decides what the project is *for*, because a game, a web page and an API have different gaps.
+
+**Evidence signals (weighted):**
+
+| Signal | Example |
+|---|---|
+| Dependencies | `phaser`, `pixi.js`, `pygame` = game. `express`, `fastapi` = API. `react`, `vue` = web app |
+| Entry points / structure | `index.html` + `manifest.json` = web page/PWA. `project.godot` = Godot game |
+| Config files | `manifest.json` with `manifest_version` = browser extension |
+| Asset types | sprites, tilemaps, audio = game |
+| Code patterns | `requestAnimationFrame` update/render loop, route definitions, custom element registration |
+| README / filenames | weak; tiebreaker only |
+
+**Output:** ranked profiles with confidence and evidence, not a single hard answer.
+
+**Lock rules:**
+- 80%+ with a clear lead: auto-lock, shown with a one-click change.
+- Mid confidence or close second: ask the user to confirm, showing evidence.
+- Low confidence: ask outright or use the generic profile.
+- User can always override. Hybrids allowed: one primary profile plus modifiers (e.g. *Game + PWA*).
+- The lock holds for the session. If later analysis contradicts it, show a banner offering to re-pivot.
+
+**A profile is a data file** containing: completeness checklist, vertical slice template, verification recipe, curated source registry. New project types are new data, not new engine code.
+
+---
+
+## 3. Verification: what "still functioning" can honestly mean
+
+| Level | Check | Reliability | Possible in AI Studio app? |
+|---|---|---|---|
+| Structural | Zip opens; untouched files byte-identical to original (SHA-256) | Fully reliable | Yes |
+| Static | JSON parses, JS/TS parses, imports resolve, no conflicting dependency entries | Reliable | Yes (limited) |
+| Behavioural | Existing tests still pass | Only as good as the tests | **No** (needs a sandbox backend) |
+| Slice smoke test | Target feature runs end to end | Possible, can be flaky | **No** (needs a sandbox backend) |
+
+The UI badge must list exactly which levels passed and state "Builds and tests were not run."
+
+## 4. Risk tiers and design rules
+
+| Tier | Contents | Default |
+|---|---|---|
+| A (low) | Config and scaffolding: `.gitignore`, `.env.example`, CI file, README sections | Pre-ticked |
+| B (medium) | Dependency adds or upgrades | Needs tick |
+| C (high) | New or transplanted code touching existing logic | Explicit approval with reasoning shown |
+
+**Design rules:**
+1. Never edit the original; work on a copy and output a new zip.
+2. Apply proposals one at a time; roll back only the failing one.
+3. Treat every zip as hostile: reject `..`, absolute paths, backslashes, null bytes, symlinks (`0xA000` mode bits); cap size, file count and compression ratio; abort the whole job on any bad entry.
+4. Check packages exist before proposing them (LLMs invent package names; typosquats are real).
+5. Track licences; generate a `NOTICE.md` listing every added library.
+6. Scan for secrets locally and redact before anything goes to an AI model.
+7. Format only generated files. Reformatting existing files breaks the "untouched files identical" guarantee.
+8. Set execute bits (`0o755 << 16`) when re-zipping, or scripts in `bin/` and `.husky/` silently break.
+9. Prefer, in order: registry library, generated code fitted to the project, copied code. No copying from reference repos in v1.
+10. Deterministic code first, AI second. Gemini output must be structured JSON validated against a schema.
+
+---
+
+## 5. AI Studio constraints and what this changes
+
+An AI Studio app is a browser front end calling Gemini. No server, Docker or npm.
+
+| Planned feature | In an AI Studio app |
+|---|---|
+| Safe unzip, hashing | Works (JSZip, Web Crypto) |
+| Stack and intent detection | Works (rules in JS, Gemini for ambiguous cases) |
+| Findings and proposals | Works (Gemini structured output grounded by registry) |
+| Apply and re-zip | Works in memory, then download |
+| Build/test verification | Not possible; structural and static only |
+| Secret scan | Works locally (regex + entropy), before any AI call |
+| Live registry verification | npm and GitHub calls mostly work; rate limits and CORS apply |
+
+Later, a backend with a network-off sandbox (local Docker, optionally gVisor; install with `--ignore-scripts`, egress only via an allowlisted package proxy) adds behavioural and slice checks. E2B Cloud runs user zips on third-party servers, which conflicts with the no-secrets-leave rule.
+
+Zip limits to start with (constants in one config file): 50 MB zipped, 200 MB uncompressed, 5,000 files, ratio under 100:1, nesting depth 20.
+
+---
+
+## 6. Profiles (draft)
+
+These are first drafts to refine, not researched facts. Each profile has a checklist, slice template and verification recipe.
+
+### 6.1 `browser-game-2d`
+- **Evidence:** deps `phaser`, `pixi.js`, `kaplay`/`kaboom`, `littlejsengine`; `canvas` usage; `requestAnimationFrame`; sprite/tilemap/audio assets; `index.html` with canvas.
+- **Completeness checklist:** input handler (keyboard, pointer, gamepad), game loop (fixed timestep), scene/state management, asset loader with progress, audio with user-gesture unlock, save/load, build/export path, pause/resume, basic tests for pure logic, README with controls.
+- **Vertical slice:** input > update > render > asset > save.
+- **Verification recipe:** (static) parse all JS/TS, check asset paths referenced exist. (Future backend) start build, load in headless browser, assert no console errors, canvas present.
+- **Registry categories:** input handling, audio, physics, save/load, asset loading, UI/menus, build/bundling, testing.
+
+### 6.2 `web-page`
+- **Evidence:** `index.html`, CSS, optional SPA framework (`react`, `vue`, `svelte`, `preact`, `solid-js`), no server code.
+- **Checklist:** `<title>` and meta, viewport, favicon, accessible landmarks, responsive CSS, manifest/service worker if PWA, build tooling, lint, tests, deploy config, README.
+- **Slice:** route/page > component > state > data fetch > test.
+- **Verification (future):** load in headless browser, no console errors, no failed requests.
+- **Registry:** not yet researched.
+
+### 6.3 `api-service`
+- **Evidence:** deps `express`, `fastify`, `hono`, `nestjs`, `fastapi`, `flask`, `django`; route definitions; Dockerfile.
+- **Checklist:** routes, input validation, auth, logging, error handling, data layer and migrations, health endpoint, tests, `.env.example`, OpenAPI docs, CI.
+- **Slice:** route > handler > service > DB > test.
+- **Verification (future):** start the service, hit the health endpoint.
+- **Registry:** not yet researched.
+
+---
+
+## 7. Licence policy
+
+JSON (use directly):
+
+```json
+[
+  {
+    "license": "MIT",
+    "policy": "Allow",
+    "safe_for_saas_backend": "Yes",
+    "safe_to_inject": "Yes",
+    "action": "Keep copyright + licence notice; list in NOTICE."
+  },
+  {
+    "license": "Apache-2.0",
+    "policy": "Allow",
+    "safe_for_saas_backend": "Yes",
+    "safe_to_inject": "Yes",
+    "action": "Keep notices, document changes; patent grant. Not compatible with GPLv2-only."
+  },
+  {
+    "license": "ISC",
+    "policy": "Allow",
+    "safe_for_saas_backend": "Yes",
+    "safe_to_inject": "Yes",
+    "action": "Permissive, MIT-equivalent."
+  },
+  {
+    "license": "BSD-3-Clause",
+    "policy": "Allow",
+    "safe_for_saas_backend": "Yes",
+    "safe_to_inject": "Yes",
+    "action": "Permissive; keep notice."
+  },
+  {
+    "license": "BSD-2-Clause",
+    "policy": "Allow",
+    "safe_for_saas_backend": "Yes",
+    "safe_to_inject": "Yes",
+    "action": "Permissive; keep notice."
+  },
+  {
+    "license": "MIT OR GPL-3.0+",
+    "policy": "Allow",
+    "safe_for_saas_backend": "Yes",
+    "safe_to_inject": "Yes",
+    "action": "Dual licence (e.g. JSZip). Elect MIT and record that election."
+  },
+  {
+    "license": "LGPL-3.0",
+    "policy": "Warn",
+    "safe_for_saas_backend": "Yes",
+    "safe_to_inject": "Review",
+    "action": "Weak copyleft. Flag for human review; never auto-apply."
+  },
+  {
+    "license": "GPL-3.0",
+    "policy": "Block",
+    "safe_for_saas_backend": "Yes (internal run only)",
+    "safe_to_inject": "No",
+    "action": "Forces GPL onto combined deliverable. Only if the user's own project is GPL/AGPL."
+  },
+  {
+    "license": "AGPL-3.0",
+    "policy": "Block",
+    "safe_for_saas_backend": "High risk",
+    "safe_to_inject": "No",
+    "action": "Network use triggers source-sharing. Do not run modified AGPL tools as SaaS or inject into user zips."
+  },
+  {
+    "license": "Source-available",
+    "policy": "Block",
+    "safe_for_saas_backend": "No",
+    "safe_to_inject": "No",
+    "action": "e.g. Moderne Source Available (OpenRewrite JS/TS/Python/security recipes), Polyform Free Trial (OpenHands/enterprise)."
+  },
+  {
+    "license": "Commercial API terms",
+    "policy": "Block",
+    "safe_for_saas_backend": "Paid licence needed",
+    "safe_to_inject": "N/A",
+    "action": "e.g. @webcontainer/api. MIT helper repos do not grant rights to the API."
+  },
+  {
+    "license": "Unlicensed",
+    "policy": "Block",
+    "safe_for_saas_backend": "No",
+    "safe_to_inject": "No",
+    "action": "No LICENSE file = all rights reserved, even if README/package.json says MIT."
+  },
+  {
+    "license": "Not stated",
+    "policy": "Unverified",
+    "safe_for_saas_backend": "Unknown",
+    "safe_to_inject": "Unknown",
+    "action": "LLM research did not state a licence. Verifier must read SPDX from npm/GitHub API. Never auto-propose until resolved."
+  }
+]
+```
+
+Rules: Allow = may be proposed. Warn = human review, never auto-apply. Block = never. `Not stated` = unverified, never auto-proposed until the verifier reads SPDX from the registry or GitHub API.
+
+---
+
+## 8. Game registry (52 entries)
+
+Fields: `tier` is `core` | `alternative` | `dev-tools` | `poor-fit` | `review` | `exclude`. `requires` gates an entry on the project (for example `engine: pixi`). `proposable_now` is true only when licence policy is Allow, tier is core or alternative, and status is not excluded or rejected. `verified` fields are null until a verifier fills them. `source_batch`: B1 to B5 are the five research batches.
+
+```json
+[
+ {
+  "id": "input-hotkeys-js",
+  "name": "hotkeys-js",
+  "package": "hotkeys-js",
+  "registry": "npm",
+  "repo_url": "https://github.com/jaywcwlove/hotkeys",
+  "category": "input handling",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "poor-fit",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Shortcut library for web apps. Games usually poll key state + Gamepad API + pointer events.",
+  "why": "Keyboard shortcut library with sequences, modifiers and scoped bindings.",
+  "pitfalls": "preventDefault conflicts with browser defaults in global scopes.",
+  "license_policy": "Allow",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "input-mousetrap",
+  "name": "mousetrap",
+  "package": "mousetrap",
+  "registry": "npm",
+  "repo_url": "https://github.com/ccampbell/mousetrap",
+  "category": "input handling",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "poor-fit",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "Apache-2.0",
+  "source_batch": "B2",
+  "flags": "Shortcut library, not a game input layer. Legacy.",
+  "why": "Small, battle-tested keyboard shortcut library.",
+  "pitfalls": "No touch or gamepad support.",
+  "license_policy": "Allow",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "input-egjs-hammerjs",
+  "name": "@egjs/hammerjs",
+  "package": "@egjs/hammerjs",
+  "registry": "npm",
+  "repo_url": "https://github.com/naver/egjs",
+  "category": "input handling",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Repo URL looks wrong (naver/egjs) - verifier package-to-repo match must confirm.",
+  "why": "Maintained Hammer.js fork for multi-touch, swipe and pinch gestures.",
+  "pitfalls": "Heavy for simple taps; steep custom recognizer learning curve.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "input-keymaster",
+  "name": "keymaster",
+  "package": "keymaster",
+  "registry": "npm",
+  "repo_url": "https://github.com/madrobby/keymaster",
+  "category": "input handling",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "poor-fit",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Unmaintained legacy shortcut library.",
+  "why": "Minimalist scoped keyboard shortcuts.",
+  "pitfalls": "No longer maintained; weak modern keyboard-layout support.",
+  "license_policy": "Allow",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "audio-howler",
+  "name": "howler.js",
+  "package": "howler",
+  "registry": "npm",
+  "repo_url": "https://github.com/goldfire/howler.js",
+  "category": "audio",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "core",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "B1 audio ranks 1-2 were truncated in the paste; re-run to confirm ranking.",
+  "why": "Widely used web audio library: sprites, spatial audio, HTML5 Audio fallback.",
+  "pitfalls": "Needs a user gesture to unlock audio on mobile; manage autoplay policy.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "audio-tone",
+  "name": "Tone.js",
+  "package": "tone",
+  "registry": "npm",
+  "repo_url": "https://github.com/Tonejs/Tone.js",
+  "category": "audio",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B1+B2",
+  "flags": null,
+  "why": "Web Audio framework: transport, musical time, synths, effects. Suits rhythm games or procedural music.",
+  "pitfalls": "DAW-style abstraction is overkill for simple SFX; schedule with Tone.now().",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "audio-zzfx",
+  "name": "ZzFX",
+  "package": "zzfx",
+  "registry": "npm",
+  "repo_url": "https://github.com/KilledByAPixel/ZzFX",
+  "category": "audio",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B1",
+  "flags": null,
+  "why": "Under 1 KB procedural SFX generator from 20 numeric parameters; no audio asset licensing.",
+  "pitfalls": "Creates AudioContext at import (breaks in Web Workers unless stubbed); SFX only (pair with ZzFXM for music).",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "audio-websfx",
+  "name": "websfx",
+  "package": "websfx",
+  "registry": "npm",
+  "repo_url": null,
+  "category": "audio",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "review",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "Not stated",
+  "source_batch": "B1",
+  "flags": "No repo, no licence, published Oct 2026: new package with no source link = supply-chain risk. Manual review only.",
+  "why": "Tree-shakeable ~3 kB ESM package synthesising 26 UI sound effects.",
+  "pitfalls": "UI/menu SFX only; playback deferred until a user gesture.",
+  "license_policy": "Unverified",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "needs-review"
+ },
+ {
+  "id": "audio-web-audio-engine",
+  "name": "web-audio-engine",
+  "package": "web-audio-engine",
+  "registry": "npm",
+  "repo_url": "https://github.com/mohayonao/web-audio-engine",
+  "category": "audio",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "exclude",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Test/Node tool, not game audio. Likely dormant despite 'Active' label.",
+  "why": "Pure JS WebAudio implementation for testing in Node.",
+  "pitfalls": "Much slower than native WebAudio.",
+  "license_policy": "Allow",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "excluded"
+ },
+ {
+  "id": "audio-pixi-sound",
+  "name": "@pixi/sound",
+  "package": "@pixi/sound",
+  "registry": "npm",
+  "repo_url": "https://github.com/pixijs/sound",
+  "category": "audio",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {
+   "engine": "pixi"
+  },
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B1+B2",
+  "flags": "Install @pixi/sound, not the older pixi-sound package. Only propose to PixiJS projects.",
+  "why": "Official PixiJS audio integration with asset loader and ticker.",
+  "pitfalls": "Tied to PixiJS; known issues: blur auto-pause crackle, iOS resume, undefined options override defaults.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "physics-rapier2d",
+  "name": "Rapier 2D",
+  "package": "@dimforge/rapier2d",
+  "registry": "npm",
+  "repo_url": "https://github.com/dimforge/rapier.js",
+  "category": "physics",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "core",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "Apache-2.0",
+  "source_batch": "B1+B2",
+  "flags": "Variants conflict across batches: @dimforge/rapier2d vs -compat vs -simd-compat vs -deterministic. Choose per bundler. Verifier to resolve.",
+  "why": "WASM 2D physics with CCD, soft bodies, joints, sensors.",
+  "pitfalls": "Needs bundler WASM support (use -compat build otherwise); -simd needs simd128; deterministic build for cross-platform determinism.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "physics-planck",
+  "name": "Planck.js",
+  "package": "planck",
+  "registry": "npm",
+  "repo_url": "https://github.com/piqnt/planck.js",
+  "category": "physics",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "core",
+  "requires": {},
+  "conflicts_with": [
+   "planck-js"
+  ],
+  "license_stated": "MIT",
+  "source_batch": "B1+B2",
+  "flags": "CONFLICT: B2 listed 'planck-js' (frozen legacy 1.3.0). B1/B4 say use 'planck' (1.5.0+). Registry uses 'planck'; verifier must confirm on npm.",
+  "why": "Pure TypeScript Box2D rewrite, no WASM, zero runtime deps.",
+  "pitfalls": "Needs fixed-timestep accumulator; queue mid-step mutations; same-device determinism only.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "physics-matter-js",
+  "name": "Matter.js",
+  "package": "matter-js",
+  "registry": "npm",
+  "repo_url": "https://github.com/liabru/matter-js",
+  "category": "physics",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B1+B2",
+  "flags": "Repo URL differs (B1 none, B2 liabru/matter-js). Do not confuse with IoT repo matter-js/matter.js.",
+  "why": "Pure JS 2D rigid-body engine with built-in canvas renderer.",
+  "pitfalls": "No continuous collision detection (fast bodies tunnel); heavy for simple collisions.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "physics-check2d",
+  "name": "check2d",
+  "package": "check2d",
+  "registry": "npm",
+  "repo_url": "https://github.com/Prozi/detect-collisions",
+  "category": "physics",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "review",
+  "requires": {},
+  "conflicts_with": [
+   "detect-collisions"
+  ],
+  "license_stated": "Not stated",
+  "source_batch": "B1",
+  "flags": "Renamed from deprecated detect-collisions; licence not stated. Verify.",
+  "why": "2D collision detection only (BVH + SAT), raycasting, no solver.",
+  "pitfalls": "No gravity or forces; update package.json from detect-collisions.",
+  "license_policy": "Unverified",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "needs-review"
+ },
+ {
+  "id": "save-idb-keyval",
+  "name": "idb-keyval",
+  "package": "idb-keyval",
+  "registry": "npm",
+  "repo_url": "https://github.com/jakearchibald/idb-keyval",
+  "category": "save/load",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "core",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "Apache-2.0",
+  "source_batch": "B1",
+  "flags": null,
+  "why": "Tiny promise-based IndexedDB key-value store; get/set, getMany, atomic update().",
+  "pitfalls": "Use update() not separate get()+set() (race); no indexing or queries.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "save-idb",
+  "name": "idb",
+  "package": "idb",
+  "registry": "npm",
+  "repo_url": "https://github.com/jakearchibald/idb",
+  "category": "save/load",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "core",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "ISC",
+  "source_batch": "B1+B2",
+  "flags": "LICENCE CONFLICT: B1 says ISC, B2 says Apache-2.0. ISC used here; verifier to confirm.",
+  "why": "Small promise-based IndexedDB wrapper with multi-store schemas and indexes.",
+  "pitfalls": "Lower-level than Dexie; need IndexedDB concepts.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "save-dexie",
+  "name": "Dexie.js",
+  "package": "dexie",
+  "registry": "npm",
+  "repo_url": "https://github.com/dexie/Dexie.js",
+  "category": "save/load",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "Apache-2.0",
+  "source_batch": "B1+B2",
+  "flags": "Dexie Cloud addon has separate seat licensing outside the Apache-2.0 core. Never propose dexie-cloud-addon.",
+  "why": "Feature-rich IndexedDB wrapper: bulk writes, queries, export/import.",
+  "pitfalls": "Bigger than idb; overkill for simple saves; dexie-export-import TS errors on dexie@2.x.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "save-fflate",
+  "name": "fflate",
+  "package": "fflate",
+  "registry": "npm",
+  "repo_url": "https://github.com/101arrowz/fflate",
+  "category": "save/load",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B1",
+  "flags": "Also used for zip handling in app stack.",
+  "why": "Fast DEFLATE/GZIP/ZIP in pure JS for compressing large saves.",
+  "pitfalls": "Do not convert Uint8Array to binary strings (doubles size); register UnzipInflate for compressed entries.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "save-lz-string",
+  "name": "lz-string",
+  "package": "lz-string",
+  "registry": "npm",
+  "repo_url": null,
+  "category": "save/load",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "Not stated",
+  "source_batch": "B1",
+  "flags": "Stale: no release in ~4 years. Licence not stated.",
+  "why": "LZ string compression for compacting text saves.",
+  "pitfalls": "Pin v1.3.7 for some server ports (encoding change in 1.3.8).",
+  "license_policy": "Unverified",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "save-localforage",
+  "name": "localForage",
+  "package": "localforage",
+  "registry": "npm",
+  "repo_url": "https://github.com/localForage/localForage",
+  "category": "save/load",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "Apache-2.0",
+  "source_batch": "B2",
+  "flags": "Probably stale (no major releases for years). B2 wrongly called the API 'synchronous-like': it is async.",
+  "why": "localStorage-style API backed by IndexedDB/WebSQL.",
+  "pitfalls": "Async API; refactor needed from sync localStorage code.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "save-file-saver",
+  "name": "FileSaver.js",
+  "package": "file-saver",
+  "registry": "npm",
+  "repo_url": "https://github.com/eligrey/FileSaver.js",
+  "category": "save/load",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Probably stale; verify.",
+  "why": "Triggers browser downloads to export saves or replays.",
+  "pitfalls": "Write-only; reading back needs FileReader.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "engine-pixijs",
+  "name": "PixiJS",
+  "package": "pixi.js",
+  "registry": "npm",
+  "repo_url": null,
+  "category": "engine / asset loading",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "core",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B1+B4",
+  "flags": "Engine itself. Presence in the zip sets requires: engine=pixi for other entries. Use 'pixi.js'; alternative 'pixijs' needs package-exports support.",
+  "why": "2D WebGL/WebGPU engine with async Assets loader and manifest bundles.",
+  "pitfalls": "TS 6/7 WebGPU type conflicts (use @types/web); couples loading to Pixi runtime.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "asset-assetpack",
+  "name": "AssetPack",
+  "package": "@assetpack/core",
+  "registry": "npm",
+  "repo_url": "https://github.com/pixijs/assetpack",
+  "category": "asset loading",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B1",
+  "flags": "Open issue #186 asks whether the project is still maintained. Verify activity.",
+  "why": "Framework-agnostic asset pipeline: atlases, mipmaps, MSDF fonts, manifests.",
+  "pitfalls": "Native sharp install errors on Windows/darwin-arm64; v1.0 broke plugin APIs.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "asset-loaders-gl",
+  "name": "loaders.gl",
+  "package": "@loaders.gl/core",
+  "registry": "npm",
+  "repo_url": null,
+  "category": "asset loading",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "exclude",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "Not stated",
+  "source_batch": "B1",
+  "flags": "Built for 3D/geospatial/tabular formats, not 2D sprites or audio. Dropped.",
+  "why": "Modular loaders for images, JSON, CSV, ZIP.",
+  "pitfalls": "Needs separate format packages.",
+  "license_policy": "Unverified",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "excluded"
+ },
+ {
+  "id": "asset-idle-resource-loader",
+  "name": "idle-resource-loader",
+  "package": "idle-resource-loader",
+  "registry": "npm",
+  "repo_url": null,
+  "category": "asset loading",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "exclude",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "Not stated",
+  "source_batch": "B1",
+  "flags": "v1.0.0, ~1 year old, no repo, no licence. Dropped.",
+  "why": "Idle-time background preloading.",
+  "pitfalls": "Not for boot progress screens or atlas/audio parsing.",
+  "license_policy": "Unverified",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "excluded"
+ },
+ {
+  "id": "asset-loadjs",
+  "name": "loadjs",
+  "package": "loadjs",
+  "registry": "npm",
+  "repo_url": "https://github.com/muicss/loadjs",
+  "category": "asset loading",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "poor-fit",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Script/CSS loader only; not a game asset loader.",
+  "why": "Async JS/CSS loader.",
+  "pitfalls": "Cannot load images, JSON or binaries.",
+  "license_policy": "Allow",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "asset-preloadjs",
+  "name": "PreloadJS",
+  "package": "preloadjs",
+  "registry": "npm",
+  "repo_url": "https://github.com/CreateJS/PreloadJS",
+  "category": "asset loading",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Stale CreateJS-era library; low priority.",
+  "why": "Loader for images, audio, JSON, sprites with progress and queue.",
+  "pitfalls": "Dated; no native ES module support.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "asset-ofetch",
+  "name": "ofetch",
+  "package": "ofetch",
+  "registry": "npm",
+  "repo_url": "https://github.com/unjs/ofetch",
+  "category": "asset loading",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "poor-fit",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "General fetch wrapper, not an asset loader.",
+  "why": "Fetch wrapper with JSON parsing, retries, timeouts.",
+  "pitfalls": "Binary assets need manual blob conversion.",
+  "license_policy": "Allow",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "asset-p-queue",
+  "name": "p-queue",
+  "package": "p-queue",
+  "registry": "npm",
+  "repo_url": "https://github.com/sindresorhus/p-queue",
+  "category": "asset loading",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Building block only; app writes the loader around it.",
+  "why": "Concurrency-limited promise queue for custom loaders.",
+  "pitfalls": "Not a loader by itself.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "ui-preact",
+  "name": "Preact",
+  "package": "preact",
+  "registry": "npm",
+  "repo_url": null,
+  "category": "UI/menus",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "Not stated",
+  "source_batch": "B1+B4",
+  "flags": "Licence not stated by research; verify SPDX.",
+  "why": "4 KB React-compatible VDOM for HTML game menus and HUD overlays.",
+  "pitfalls": "Isolate high-frequency HUD state from full-tree re-renders.",
+  "license_policy": "Unverified",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "ui-solid-js",
+  "name": "SolidJS",
+  "package": "solid-js",
+  "registry": "npm",
+  "repo_url": "https://github.com/solidjs/solid",
+  "category": "UI/menus",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "Not stated",
+  "source_batch": "B1+B4",
+  "flags": "Licence not stated by research; verify SPDX.",
+  "why": "Compiles JSX to real DOM nodes; fine-grained updates for HUD counters.",
+  "pitfalls": "Needs @solidjs/vite-plugin; component bodies run once.",
+  "license_policy": "Unverified",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "ui-pixi-ui",
+  "name": "PixiUI",
+  "package": "@pixi/ui",
+  "registry": "npm",
+  "repo_url": null,
+  "category": "UI/menus",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {
+   "engine": "pixi"
+  },
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B1",
+  "flags": "Only for PixiJS projects; v1.x for Pixi 7, v2.x for Pixi 8.",
+  "why": "In-canvas widget suite: buttons, sliders, lists, scrollbox.",
+  "pitfalls": "Locked to Pixi major versions; named exports only.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "ui-tweakpane",
+  "name": "Tweakpane",
+  "package": "tweakpane",
+  "registry": "npm",
+  "repo_url": "https://github.com/tweakpane/tweakpane",
+  "category": "UI/menus",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "dev-tools",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B1+B2",
+  "flags": "Debug/tuning panel, not player-facing UI. Keep out of normal proposals.",
+  "why": "Parameter-tuning UI with folders, tabs, JSON export.",
+  "pitfalls": "v4 ESM-only; needs @tweakpane/core for TS.",
+  "license_policy": "Allow",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "ui-lil-gui",
+  "name": "lil-gui",
+  "package": "lil-gui",
+  "registry": "npm",
+  "repo_url": "https://github.com/georgealways/lil-gui",
+  "category": "UI/menus",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "dev-tools",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Debug tool only.",
+  "why": "Lightweight dat.gui successor for dev controls.",
+  "pitfalls": "Basic styling; not for player UI.",
+  "license_policy": "Allow",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "ui-imgui-js",
+  "name": "imgui-js",
+  "package": "imgui-js",
+  "registry": "npm",
+  "repo_url": "https://github.com/flyover/imgui-js",
+  "category": "UI/menus",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "dev-tools",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Debug tool only.",
+  "why": "Dear ImGui port (JS/WASM) for in-canvas debug overlays.",
+  "pitfalls": "Needs WASM setup; immediate-mode paradigm.",
+  "license_policy": "Allow",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "ui-leva",
+  "name": "Leva",
+  "package": "leva",
+  "registry": "npm",
+  "repo_url": "https://github.com/pmndrs/leva",
+  "category": "UI/menus",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "dev-tools",
+  "requires": {
+   "framework": "react"
+  },
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Debug tool; React only.",
+  "why": "React-based parameter GUI.",
+  "pitfalls": "Requires React.",
+  "license_policy": "Allow",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "build-vite-plugin-pwa",
+  "name": "vite-plugin-pwa",
+  "package": "vite-plugin-pwa",
+  "registry": "npm",
+  "repo_url": "https://github.com/vite-pwa/vite-plugin-pwa",
+  "category": "build/bundling",
+  "profiles": [
+   "browser-game-2d",
+   "web-page"
+  ],
+  "tier": "core",
+  "requires": {
+   "build": "vite"
+  },
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B1",
+  "flags": "Profile modifier: Game + PWA. v2 needs Node 20.19+.",
+  "why": "Zero-config Workbox service worker + manifest for Vite.",
+  "pitfalls": "Configure update prompts so offline players get updates.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "build-phaser-template-vite-ts",
+  "name": "Phaser Vite TypeScript Template",
+  "package": "phaserjs/template-vite-ts",
+  "registry": "github",
+  "repo_url": "https://github.com/phaserjs/template-vite-ts",
+  "category": "build/bundling",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {
+   "engine": "phaser"
+  },
+  "conflicts_with": [],
+  "license_stated": "Not stated",
+  "source_batch": "B1",
+  "flags": "Template (copy-based): licence must be verified before any code is injected. Default scripts send anonymous telemetry; use dev-nolog/build-nolog.",
+  "why": "Official Phaser + Vite + TypeScript starter.",
+  "pitfalls": "Telemetry in default npm scripts.",
+  "license_policy": "Unverified",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "build-littlejs",
+  "name": "LittleJS",
+  "package": "littlejsengine",
+  "registry": "npm",
+  "repo_url": "https://github.com/KilledByAPixel/LittleJS",
+  "category": "build/bundling",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "alternative",
+  "requires": {
+   "engine": "littlejs"
+  },
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B1",
+  "flags": "Engine + Vite starter (degit). Only for LittleJS projects.",
+  "why": "Tiny 2D/3D engine with Vite starter template.",
+  "pitfalls": "Specific to littlejsengine API.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "build-vite-plugin-singlefile",
+  "name": "vite-plugin-singlefile",
+  "package": "vite-plugin-singlefile",
+  "registry": "npm",
+  "repo_url": "https://github.com/richardtallent/vite-plugin-singlefile",
+  "category": "build/bundling",
+  "profiles": [
+   "browser-game-2d",
+   "web-page"
+  ],
+  "tier": "alternative",
+  "requires": {
+   "build": "vite"
+  },
+  "conflicts_with": [
+   "history-api-routing"
+  ],
+  "license_stated": "Not stated",
+  "source_batch": "B1",
+  "flags": "Breaks History API routing, dynamic import() chunks, cookies under file://. Offline single-file builds only.",
+  "why": "Inlines JS/CSS into one index.html.",
+  "pitfalls": "Single entry point only; poor for server hosting.",
+  "license_policy": "Unverified",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "build-ts-online-game-template",
+  "name": "TypeScript Online Game Template",
+  "package": "asteinheiser/ts-online-game-template",
+  "registry": "github",
+  "repo_url": "https://github.com/asteinheiser/ts-online-game-template",
+  "category": "build/bundling",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "review",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "Not stated",
+  "source_batch": "B1",
+  "flags": "Heavy infra (Docker, Postgres, Supabase keys, signing secrets). Pattern reference only, not injectable.",
+  "why": "Vite+Turborepo+pnpm monorepo with Phaser, React, Colyseus, PWA, Electron.",
+  "pitfalls": "Needs Docker + local Postgres to test.",
+  "license_policy": "Unverified",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "needs-review"
+ },
+ {
+  "id": "build-vite",
+  "name": "Vite",
+  "package": "vite",
+  "registry": "npm",
+  "repo_url": "https://github.com/vitejs/vite",
+  "category": "build/bundling",
+  "profiles": [
+   "any"
+  ],
+  "tier": "core",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": null,
+  "why": "Fast HMR dev server and Rollup-based production builds.",
+  "pitfalls": "Rollup build can struggle with messy legacy CommonJS.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "build-esbuild",
+  "name": "esbuild",
+  "package": "esbuild",
+  "registry": "npm",
+  "repo_url": "https://github.com/evanw/esbuild",
+  "category": "build/bundling",
+  "profiles": [
+   "browser-game-2d",
+   "web-page"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Match the project's existing tooling; do not swap bundlers.",
+  "why": "Very fast bundler.",
+  "pitfalls": "Fewer plugin/code-splitting features.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "build-rollup",
+  "name": "Rollup",
+  "package": "rollup",
+  "registry": "npm",
+  "repo_url": "https://github.com/rollup/rollup",
+  "category": "build/bundling",
+  "profiles": [
+   "browser-game-2d",
+   "web-page"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Match existing tooling only.",
+  "why": "Tree-shaking ESM bundler; engine under Vite.",
+  "pitfalls": "Verbose config.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "build-webpack",
+  "name": "Webpack",
+  "package": "webpack",
+  "registry": "npm",
+  "repo_url": "https://github.com/webpack/webpack",
+  "category": "build/bundling",
+  "profiles": [
+   "browser-game-2d",
+   "web-page"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Match existing tooling only.",
+  "why": "Highly configurable with large plugin ecosystem.",
+  "pitfalls": "Slow; complex config.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "test-vitest",
+  "name": "Vitest",
+  "package": "vitest",
+  "registry": "npm",
+  "repo_url": "https://github.com/vitest-dev/vitest",
+  "category": "testing",
+  "profiles": [
+   "any"
+  ],
+  "tier": "core",
+  "requires": {
+   "build": "vite"
+  },
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B1+B2",
+  "flags": null,
+  "why": "Vite-native unit test runner.",
+  "pitfalls": "DOM/canvas need jsdom/happy-dom or browser mode; not for visual regression.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "test-playwright",
+  "name": "Playwright Test",
+  "package": "@playwright/test",
+  "registry": "npm",
+  "repo_url": "https://github.com/microsoft/playwright",
+  "category": "testing",
+  "profiles": [
+   "browser-game-2d",
+   "web-page",
+   "api"
+  ],
+  "tier": "core",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "Apache-2.0",
+  "source_batch": "B1+B2",
+  "flags": "Canvas games need screenshot/coordinate strategies, not DOM locators.",
+  "why": "E2E runner across Chromium/Firefox/WebKit with traces.",
+  "pitfalls": "Heavy setup; overkill for pure logic.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "test-vitest-browser-playwright",
+  "name": "Vitest Playwright browser provider",
+  "package": "@vitest/browser-playwright",
+  "registry": "npm",
+  "repo_url": null,
+  "category": "testing",
+  "profiles": [
+   "browser-game-2d",
+   "web-page"
+  ],
+  "tier": "alternative",
+  "requires": {
+   "test": "vitest"
+  },
+  "conflicts_with": [],
+  "license_stated": "Not stated",
+  "source_batch": "B1",
+  "flags": "Licence not stated; verify.",
+  "why": "Runs Vitest browser tests via Playwright.",
+  "pitfalls": "Provider only, not a runner.",
+  "license_policy": "Unverified",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "test-pixelmatch",
+  "name": "pixelmatch",
+  "package": "pixelmatch",
+  "registry": "npm",
+  "repo_url": "https://github.com/mapbox/pixelmatch",
+  "category": "testing",
+  "profiles": [
+   "browser-game-2d",
+   "web-page"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "Not stated",
+  "source_batch": "B1+B4",
+  "flags": "Licence not stated; verify. @types/pixelmatch is obsolete - do not install.",
+  "why": "Pixel-level image diff with OKLab metrics.",
+  "pitfalls": "Image sizes must match; tune threshold/includeAA.",
+  "license_policy": "Unverified",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "test-fast-check-vitest",
+  "name": "@fast-check/vitest",
+  "package": "@fast-check/vitest",
+  "registry": "npm",
+  "repo_url": null,
+  "category": "testing",
+  "profiles": [
+   "browser-game-2d",
+   "web-page"
+  ],
+  "tier": "alternative",
+  "requires": {
+   "test": "vitest"
+  },
+  "conflicts_with": [],
+  "license_stated": "Not stated",
+  "source_batch": "B1",
+  "flags": "Licence not stated; verify.",
+  "why": "Property-based, seed-reproducible tests in Vitest.",
+  "pitfalls": "Needs vitest and require(esm).",
+  "license_policy": "Unverified",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "test-jest",
+  "name": "Jest",
+  "package": "jest",
+  "registry": "npm",
+  "repo_url": "https://github.com/jestjs/jest",
+  "category": "testing",
+  "profiles": [
+   "any"
+  ],
+  "tier": "alternative",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Match existing tooling only.",
+  "why": "Mature unit test runner.",
+  "pitfalls": "Slower than Vitest; extra TS/ESM config.",
+  "license_policy": "Allow",
+  "proposable_now": true,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ },
+ {
+  "id": "test-cypress",
+  "name": "Cypress",
+  "package": "cypress",
+  "registry": "npm",
+  "repo_url": "https://github.com/cypress-io/cypress",
+  "category": "testing",
+  "profiles": [
+   "browser-game-2d"
+  ],
+  "tier": "poor-fit",
+  "requires": {},
+  "conflicts_with": [],
+  "license_stated": "MIT",
+  "source_batch": "B2",
+  "flags": "Weak fit for canvas games; Playwright covers E2E.",
+  "why": "Browser E2E with time-travel debugging.",
+  "pitfalls": "Awkward for WebGL/Canvas.",
+  "license_policy": "Allow",
+  "proposable_now": false,
+  "verified": {
+   "license_spdx": null,
+   "latest_version": null,
+   "last_publish": null,
+   "archived": null,
+   "verified_on": null
+  },
+  "status": "unverified"
+ }
+]
+```
+
+### Matching rules the app must follow
+1. Profile matches, tier is core or alternative, `requires` satisfied by the project, nothing in `conflicts_with` present, licence policy Allow.
+2. Never propose `review`, `exclude`, `poor-fit`, `dev-tools`, or any `Not stated` licence entry.
+3. Resolve conflicts listed in Section 11 before relying on an entry.
+4. Prefer to match tooling the project already uses (bundler, test runner) rather than swap it.
+
+---
+
+## 9. App stack (tools for building the analyser itself, never proposed to user zips)
+
+MVP decision: **Use** = adopt now. **Defer** = later. **Avoid** = rejected for stated reason. **Review** = licence or maturity check first.
+
+| Name | Identifier | Type | Subsystem | Licence (stated) | MVP decision | Reason | Risk / notes |
+|---|---|---|---|---|---|---|---|
+| yauzl | yauzl | npm | Ingest (read zip) | MIT | Use | Streaming reader with lazyEntries and filename validation. Pair with your own guards. | Still needs own path/symlink/size checks. |
+| Archiver | archiver | npm | Seal (write zip) | MIT | Use | Streaming writer; set 0o755<<16 external attrs for scripts. | Default writers strip exec bits unless set. |
+| yazl | yazl | npm | Seal (write zip) | MIT | Defer | Lower-level entry control and auto ZIP64; alternative to archiver. |  |
+| fflate | fflate | npm | Ingest / Seal | MIT | Defer | Fastest on thousands of tiny files; consider if many small source files. | Hand-roll safety checks. |
+| JSZip | jszip | npm | Ingest / Seal | MIT OR GPL-3.0+ | Avoid | Loads whole archive in memory; 2.6x slower on streams. Replaced by yauzl+archiver for server side. | Dual licence: elect MIT and record it. |
+| unzipper | unzipper | npm | Ingest (read zip) | MIT | Avoid | yauzl preferred. Past path-traversal advisories: verify before use. | Check advisories. |
+| adm-zip | adm-zip | npm | Ingest / Seal | MIT | Avoid | Sync, buffers whole archive; unsuitable for multi-tenant server. Past path-traversal advisories. | Check advisories. |
+| @zip.js/zip.js | @zip.js/zip.js | npm | Ingest / Seal | Not stated | Defer | Fast concurrent add() and AES, but ~160 KB per entry on 5,000 files. |  |
+| node:zlib ZIP API | node:zlib (Node 26.8+) | builtin | Ingest / Seal | Node.js built-in | Avoid | Experimental; no automatic Zip Slip or duplicate-name checks. Version claim unverified. | Unverified version claim. |
+| pompelmi | pompelmi | npm | Ingest (pre-scan) | Not stated | Review | Zip-bomb / magic-byte pre-scan. Small, unfamiliar; the checks are about 50 lines to write yourself. | Unknown maturity. |
+| zipstream-ng | zipstream-ng | pypi | Seal (Python) | Not stated | Defer | Python streaming zip writer; only if backend is Python. |  |
+| Tree-sitter | web-tree-sitter | npm | Analysis (multi-language) | MIT | Use | Intent scan and structure across languages. | Needs per-language WASM grammars. |
+| ts-morph | ts-morph | npm | Analysis + modification (JS/TS) | MIT | Use | Slice tracing and type-aware edits. Appeared twice (analysis and modification). | Heavy memory on large monorepos. |
+| ast-grep | @ast-grep/napi | npm | Analysis + codemods | MIT | Use | Fast structural search/replace across languages. Benchmark is from a sponsor (Codemod). | Syntax only; no type info. |
+| go-enry | go-enry/go-enry | go | Analysis (language detection) | Not stated | Use | Language classification and vendor/binary filtering. Verify licence. |  |
+| @netlify/framework-info | @netlify/framework-info | npm | Analysis (JS framework) | Not stated | Use | Detects framework and build command. Verify licence. |  |
+| Knip | knip | npm | Audit | ISC | Use | Unused files/exports and unlisted dependencies. Advisory mode only (--no-exit-code); never auto-delete. | Dynamic imports cause false positives. |
+| dependency-cruiser | dependency-cruiser | npm | Audit | MIT | Defer | Import-graph/boundary validation. |  |
+| oxcruise | oxcruise | npm | Audit | Not stated | Defer | Rust rebuild of dependency-cruiser; small project. |  |
+| Oxlint | oxlint | npm | Audit (lint) | Not stated | Defer | Very fast linter. Verify licence. |  |
+| Semgrep | semgrep | pypi / binary | Audit (SAST) | Open source CLI (Pro rules commercial) | Review | Engine is open source but rule sets carry separate licence terms that may restrict commercial SaaS. Slow (7.5 s / 250 MB on 500 files). | Check rules licence. |
+| npm-check-updates | npm-check-updates | npm | Deterministic fixes | Not stated | Use | --doctor runs install + tests and restores on failure; supports cooldown. |  |
+| Repomix | repomix | npm | AI context packing | Not stated | Defer | Tree-sitter --compress (~70% token cut claimed) and Secretlint redaction. Only needed once an LLM step exists. | Reduction figure is vendor-reported. |
+| LibCST | libcst | pypi | Codemods (Python) | Not stated | Defer | Lossless Python codemods; for a later Python profile. |  |
+| GritQL | gritql | binary | Codemods | Not stated | Defer | Declarative codemod DSL; Biome's .grit plugin is diagnostic-only. |  |
+| recast | recast | npm | Codemods (JS) | Not stated | Defer | Minimal-diff JS codemods. |  |
+| jscodeshift | jscodeshift | npm | Codemods (JS) | MIT | Avoid | Overlaps ts-morph; slower; syntax only. |  |
+| OpenRewrite | openrewrite/rewrite | jvm | Codemods | Apache-2.0 core; Moderne Source Available for JS/TS/Python/security recipes | Avoid | Licensing trap: non-Apache modules bar managed SaaS use. | Source-available. |
+| OpenHands (core + SDK) | OpenHands/software-agent-sdk | python / ts | AI agent harness | MIT (core); Polyform Free Trial (enterprise dir) | Defer | Most complete headless harness with Docker sandbox. Exclude OpenHands/enterprise (30 days/year cap). | Enterprise dir is source-available. |
+| OpenCode | opencode | npm / binary | AI agent harness | MIT | Defer | opencode serve + JS/TS SDK; LSP diagnostics. No built-in sandbox. | Must wrap in container/microVM. |
+| mini-SWE-agent | mini-swe-agent | pypi | AI agent harness | MIT | Defer | Minimal bash loop; good base for custom fixed pipeline. |  |
+| Cline | cline | npm / ext | AI agent harness | Apache-2.0 (JetBrains plugin closed) | Defer | Headless CLI; runs on host unless isolated. |  |
+| Aider / cecli | cecli (aider-ce) | pypi | AI agent harness | Apache-2.0 | Defer | Diff search/replace edit formats; upstream Aider in maintenance since Feb 2026. |  |
+| LangChain.js | langchain | npm | AI / RAG | MIT | Avoid | Not needed for MVP: call a model API directly. | Frequent breaking changes. |
+| Octokit | octokit | npm | Registry verification / repo search | MIT | Use | GitHub API client for the verifier. | Rate limits: use a token. |
+| Meilisearch client | meilisearch-js | npm | Registry search | MIT | Avoid | Overkill for a few hundred registry rows; JSON or SQLite FTS is enough. | Needs separate server. |
+| BullMQ | bullmq | npm | Job queue | MIT | Defer | Needs Redis; add when more than one job runs at a time. | Infra overhead. |
+| Prisma | prisma | npm | Persistence | Apache-2.0 | Avoid | SQLite or JSON files per job is enough for MVP. |  |
+| Zod | zod | npm | Validation | MIT | Use | Validate profile files, findings and proposals. |  |
+| React Markdown | react-markdown | npm | Report UI | MIT | Defer | Only if UI is React; start with HTML/Markdown report. | Needs remark-gfm for GFM. |
+| @react-pdf/renderer | @react-pdf/renderer | npm | Report PDF | MIT | Defer | PDF export can wait. | Limited CSS. |
+| Handlebars | handlebars | npm | Report templates | MIT | Use | HTML report from structured findings. |  |
+| memfs | memfs | npm | Modification | Apache-2.0 | Avoid | Verify step needs a real temp dir on disk for npm install/build/test. OK only for unit-testing the apply engine. | Lost on crash. |
+| Prettier | prettier | npm | Modification | MIT | Use | Format ONLY generated files, match the project's config; reformatting existing files breaks the untouched-files-identical check. | Noisy diffs if misused. |
+| isomorphic-git | isomorphic-git | npm | Diff / rollback snapshots | MIT declared; bundles LGPL-3.0-or-later code (v1.44.14) | Review | Declared MIT but bundles path code copied from @zenfs/core labelled LGPL-3.0-or-later. Audit before use. | Licence mismatch. |
+| E2B (Firecracker) | e2b | service / oss | Sandbox | Apache-2.0 runtime | Defer | Strongest isolation, but E2B Cloud runs user zips on a third party's servers (conflicts with never-send-secrets rule). Self-host is real infra work. | Privacy; Cloud-only on self-serve tiers per third-party reviews. |
+| Docker, no network (+ gVisor optional) | docker / runsc | binary | Sandbox | Not stated | Use | MVP sandbox. Install with --ignore-scripts, egress only to allowlisted package proxy, scripts only in sealed network-off step. | Shares host kernel; weaker than microVM. |
+| Modal Sandboxes (gVisor) | modal | service | Sandbox | Not stated | Avoid | gVisor covers ~70-80% of syscalls; limited Node.js support. |  |
+| Dagger | dagger | binary | Sandbox / CI | Not stated | Defer | Pair inside a microVM for untrusted uploads. |  |
+| StackBlitz WebContainers | @webcontainer/api | npm | Sandbox (browser) | Commercial API terms | Avoid | Paid licence for commercial use; MIT only covers helper repos. | Licence. |
+| Daytona (legacy OSS) | daytona v0.190.0 | service | Sandbox | AGPL-3.0 | Avoid | Core moved private June 2026; last public snapshot unmaintained AGPL. | AGPL. |
+
+---
+
+## 10. Reference repositories (pattern references only in v1)
+
+The catalog is mostly full-stack SaaS starters, which do not match the first three profiles. Use them to learn structure (folder layout, auth wiring, test setup) and generate matching code. Do not copy code from them in v1.
+
+| Repo | Stack | Capabilities | Licence (stated) | Profile fit | Caveats | Licence policy (auto) | Use as |
+|---|---|---|---|---|---|---|---|
+| vercel/next-forge | Turborepo, Next.js, Clerk, Stripe, Resend, Sentry, Arcjet | Multi-app SaaS: web, app, API, docs, email, Storybook, observability | MIT | web-app (pattern reference) | Ties tightly to hosted vendors (Clerk, Stripe, Resend). | Allow | Pattern reference (generate from it; no direct copy in MVP) |
+| t3-oss/create-t3-app | Next.js, tRPC, Tailwind, Prisma/Drizzle, NextAuth.js | Modular CLI scaffold, end-to-end TS safety | Not stated | web-app | Verify root LICENSE. Omits state libs and billing. | Unverified | Hold until verified |
+| t3-oss/create-t3-turbo | Turborepo, Next.js/TanStack Start, Expo, Drizzle, Better Auth | Web + mobile monorepo | Not stated | web-app | Verify root LICENSE. Better Auth proxy needed for Expo OAuth. | Unverified | Hold until verified |
+| ixartz/SaaS-Boilerplate | Next.js, TypeScript | Single-repo Next.js SaaS foundation | MIT | web-app | Lighter than next-forge for non-monorepo uploads. | Allow | Pattern reference (generate from it; no direct copy in MVP) |
+| alan2207/bulletproof-react | React, TypeScript | Feature-based folder architecture | Not stated | web-app (structure only) | Verify root LICENSE. No backend/auth/billing. | Unverified | Hold until verified |
+| epicweb-dev/epic-stack | React Router v7, React 19, Prisma 6, Tailwind v4, SQLite | Passkeys, Conform, Playwright, Vitest, MSW | Not stated | web-app | Verify root LICENSE. Dropped better-sqlite3 Mar 2025; LiteFS Cloud sunset late 2024. | Unverified | Hold until verified |
+| wasp-lang/open-saas | Wasp, React, Node.js, Prisma, Tailwind | Email/OAuth, Stripe/Polar payments, PgBoss jobs, Playwright, AGENTS.md | MIT | web-app | Coupled to Wasp's main.wasp DSL unless extracting standalone patterns. | Allow | Pattern reference (generate from it; no direct copy in MVP) |
+| scosman/CMSaasStarter | SvelteKit, Tailwind, Supabase Auth, Stripe, Vitest | Marketing site, blog/search, dashboard, billing | Not stated | web-app | Verify root LICENSE. Open issues: Cloudflare email, OAuth-only deletion. | Unverified | Hold until verified |
+| honojs/honox | Hono, Vite, hono/jsx | File-based routing, edge SSR, islands | Not stated | web-app / api | Verify root LICENSE. Alpha, breaking changes in minor versions. | Unverified | Hold until verified |
+| brocoders/nestjs-boilerplate | NestJS, TypeORM/Mongoose, Postgres/MongoDB, Docker | REST API, auth, RBAC, i18n, Swagger | MIT | api | 35.7% EJS generator templates in repo. | Allow | Pattern reference (generate from it; no direct copy in MVP) |
+| fastapi/full-stack-fastapi-template | FastAPI, SQLModel, Pydantic, PostgreSQL, React, Vite | Generated client, Playwright, Docker Compose, Traefik | MIT | api | Primary Python + React reference. | Allow | Pattern reference (generate from it; no direct copy in MVP) |
+| CuriousLearner/django-keel | Django 5.2/6.0, Python 3.12-3.14 | 12-factor, DRF + Strawberry GraphQL, Celery/Temporal, OpenTelemetry | Not stated | api | Verify root LICENSE. | Unverified | Hold until verified |
+| cookiecutter/cookiecutter-django | Django, PostgreSQL, Docker, Traefik | Cookiecutter generator | Generated project selects MIT/BSD/GPLv3/Apache-2.0 | api | Jinja placeholders until rendered; GPL option means check chosen licence. | Review | Hold until verified |
+| loco-rs/loco | Rust | Web/API framework with OpenAPI and jobs | Apache-2.0 | api (Rust) | Mature reference. | Allow | Pattern reference (generate from it; no direct copy in MVP) |
+| withastro/starlight | Astro 7, Tailwind | Product docs | MIT | web-page |  | Allow | Pattern reference (generate from it; no direct copy in MVP) |
+| onwidget/astrowind | Astro 7, Tailwind CSS 4 | 30+ SaaS marketing sections | Not stated | web-page | Verify root LICENSE. | Unverified | Hold until verified |
+| Astroship | Astro 5 | Landing page starter | GPL-3.0 | web-page | README says GPL-2.0, LICENSE file says GPL-3.0. Never inject. | Block | Never use |
+| Syntro | Astro | Landing page starter | GPL-3.0 | web-page | Never inject. | Block | Never use |
+| Dante | Astro | Landing page starter | GPL-3.0 | web-page | Never inject. | Block | Never use |
+| RicoUI SaaS Template | Astro | SaaS landing template | Unlicensed | web-page | No LICENSE file: all rights reserved. | Block | Never use |
+| melkeydev/go-blueprint | Go | API starter | Not stated | api (Go) | No metadata/licence verified in research. Audit directly before indexing. | Unverified | Hold until verified |
+
+---
+
+## 11. Conflicts, flags and backlog
+
+### Conflicts and flags
+| Item | What the sources say | Handling in this sheet | Next action |
+|---|---|---|---|
+| Planck package name | B2 says planck-js (frozen 1.3.0); B1 and B4 say planck (1.5.0+). | Registry uses 'planck'. | Verifier: check npm for both names and latest versions. |
+| Rapier package variants | @dimforge/rapier2d, -compat, -simd-compat, -deterministic all mentioned. | One entry with variants noted. | Pick variant per project bundler/WASM support. |
+| idb licence | B1: ISC. B2: Apache-2.0. | ISC used. | Verifier reads SPDX. |
+| Matter.js repo | B1: no repo. B2: liabru/matter-js. IoT repo matter-js/matter.js is unrelated. | liabru/matter-js kept. | Verifier: match npm repository field. |
+| @egjs/hammerjs repo | Repo URL points to naver/egjs. | Flagged. | Verify package-to-repo match. |
+| JSZip licence | Dual: MIT OR GPL-3.0+. | Allowed, elect MIT. | Record the election in NOTICE. |
+| isomorphic-git | Declares MIT but bundles LGPL-3.0-or-later path code (v1.44.14). | Review. | Audit or avoid. |
+| Phaser template telemetry | Default npm scripts send anonymous usage data. | Flagged. | Use dev-nolog / build-nolog or strip. |
+| Batch 1 truncated | Paste began mid-entry (@pixi/sound); audio ranks 1-2 and any earlier categories missing. Input handling absent from B1. | Partly covered by B2. | Re-run research for truncated categories. |
+| Batch 5 duplicate | Batch 5 is identical to batch 3 (app stack). | Merged once. | None. |
+| Activity field unreliable | B2/B3 use 'Active (2024-2026)' on almost every entry; B1 uses 'published N days ago' with no retrieval date. | Dropped. | Verifier stores absolute publish dates. |
+| Licences from LLM | About half of B1 entries say 'Not stated in available sources'. | Shown as 'Not stated' = Unverified. | Verifier overwrites from SPDX. |
+| Version claims unverified | e.g. vitest 5.1.1, solid-js 2.0.3, preact 11.2.0, Node 26.8 zip API. | Not stored. | Pin versions from registry at verify time. |
+| Benchmarks are vendor-sourced | Codemod benchmark (Codemod sponsors ast-grep); zip.js benchmarks; sandbox latency from vendor docs. | Not stored as fact. | Re-benchmark if it drives a decision. |
+| Semgrep rules licence | Engine open source; rule sets have own terms. | Review. | Check before commercial SaaS use. |
+| E2B Cloud privacy | User zips would run on third-party servers. | Deferred. | MVP: local Docker, no network. |
+| Reference templates vs profiles | Catalog is mostly SaaS starters; your first profiles are game, web page, API. | Marked pattern reference only. | Generate matching code instead of copying. |
+
+### Research backlog
+| Area | Item | Priority | Note |
+|---|---|---|---|
+| Registry content | Game: engines and renderers (Phaser, PixiJS, Kaboom, LittleJS) | High | Needed to populate 'requires' field |
+| Registry content | Game: game loop and state machine / scene management | High | Fixed-timestep loop, scenes |
+| Registry content | Game: tilemaps and level formats | Medium |  |
+| Registry content | Game: ECS / entity management | Medium |  |
+| Registry content | Game: gamepad and touch controls (replace shortcut libs) | High | Input handling needs a proper re-run |
+| Registry content | Game: pathfinding and basic AI | Low | Optional |
+| Registry content | Re-run truncated batch 1 categories (audio ranks 1-2 and earlier) | High |  |
+| Registry content | Profile 2: web page / web app registry (not researched yet) | High | Only partly covered by incidental entries |
+| Registry content | Profile 3: API / backend registry (not researched yet) | High | Validation, auth, logging, ORM, tests |
+| App tooling | Secret scanning (nominated: gitleaks, trufflehog; Secretlint via Repomix) | High | Claude nomination, not researched |
+| App tooling | Vulnerability scanning (nominated: npm audit, osv-scanner) | High | Claude nomination, not researched |
+| App tooling | Licence detection for the user's own project (SPDX tooling, licensee, license-checker) | High | Claude nomination, not researched |
+| App tooling | Diff and patch (jsdiff, git apply) and rollback format | High |  |
+| App tooling | Hashing manifest (Node crypto built-in) | Medium | No library needed |
+| App tooling | Headless browser verification recipes per profile | Medium | Playwright already listed |
+| Design | Patch / proposal data format and rollback spec | High |  |
+| Design | Profile file schema (checklist, slice template, verification recipe, sources) | High |  |
+| Design | Intent classifier evidence weights and confidence thresholds | High |  |
+| Build | Verifier script (npm/PyPI/GitHub APIs -> SPDX, latest publish, archived flag, status) | High | Needs live network + GitHub token; not run here |
+| Build | Scheduled re-verification (monthly) and stale flagging | Medium |  |
+
+---
+
+## 12. Prompts for AI Studio
+
+Run them in order, one at a time, testing with a real zip between each. Keep three test zips: a clean tiny project, a deliberately incomplete one, and a hostile one (a `../` entry and a zip bomb). If the app changes something you did not ask for, say "revert changes to X and only change Y". Duplicate the existing app first.
+
+### Prompt 0: context and scaffold
+```
+I'm repurposing this app. Discard its current purpose; keep the project setup.
+
+New purpose: "Zip Upgrader". The user uploads a .zip of a software project. The app analyses it, works out what kind of project it is, lists gaps and proposed upgrades, lets the user approve proposals, applies them to a copy, and returns an updated .zip plus a changelog.
+
+Pipeline stages: Upload > Analyse > Intent lock > Findings and proposals > Approve > Apply > Verify > Download.
+
+Hard rules:
+- Everything runs in the browser. Never modify the original upload; work on a copy.
+- Every file in the output that we did not change must be byte-identical to the input (keep a SHA-256 manifest).
+- Fail closed: if the zip is malformed or breaks any limit, stop and show why.
+- Never send secrets to Gemini. Scan locally and redact first.
+- Use Gemini only for judgement calls (intent when unclear, gap reasoning, generating files). Use plain code for everything deterministic. Gemini output must use structured JSON schemas, validated before use.
+- Be honest about verification: report which levels passed (structural, static) and state that builds and tests were not run.
+
+Start by restructuring the app into a stage-based state machine with a clear UI per stage. Do not implement the stages yet, only the scaffold, a progress bar, and a typed shared state object. Reply with the file structure first.
+```
+
+### Prompt 1: ingest and safety
+```
+Implement the Upload and Ingest stage using JSZip and the Web Crypto API.
+
+Safety checks, abort the whole job on any failure and show the reason:
+- Reject entry names containing "..", a leading "/", drive letters, backslashes or null bytes.
+- Reject symlink entries (unix mode bits 0xA000).
+- Limits: max 50 MB zipped, 200 MB uncompressed total, 5,000 files, compression ratio under 100:1, nesting depth 20. Make these constants at the top of one config file.
+- Reject nested archives or flag them as skipped.
+- Ignore node_modules, .git, build output and binary files for analysis, but keep them in the manifest and in the final zip.
+
+Outputs to shared state: file tree, SHA-256 manifest of every file, text file contents (capped per file), skipped list with reasons.
+
+Add a local secret scan (common key patterns plus high-entropy strings in .env, config and source files). Show findings with file and line, never the secret value in full. Mark flagged files "redact before AI".
+
+Keep the stage scaffold from before unchanged.
+```
+
+### Prompt 2: analysis and intent lock
+```
+Implement the Analyse and Intent stages.
+
+Part A, deterministic detection in plain code: languages by extension, package manager and entry points (package.json, requirements.txt, pyproject, index.html, manifest.json, project.godot and similar), dependencies, framework and bundler, presence of tests, CI, lockfile, README, licence file, .env.example.
+
+Part B, intent classification. Load profiles from the PROFILES section of the handover document (browser-game-2d, web-page, api-service). Score each profile on weighted evidence: dependencies, entry points, config files, asset types, code patterns, README (weak, tiebreak only). Output a ranked list with confidence and the evidence for each.
+
+Rules:
+- 80%+ and a clear lead: auto-lock, shown with a one-click change.
+- Otherwise: ask Gemini with the evidence summary (never raw secrets) and a JSON schema, then let the user confirm.
+- Always allow user override, and allow one primary profile plus optional modifiers (e.g. Game + PWA).
+- The lock holds for the session. If later analysis contradicts it, show a banner offering to re-pivot.
+
+Do not touch the Ingest stage.
+```
+
+### Prompt 3: findings and proposals
+```
+Implement the Findings and Proposals stage.
+
+Inputs: locked profile, analysis, the registry JSON (Section 8) and licence policy JSON (Section 7) from the handover document. Store them as separate JSON files in the app.
+
+Produce two separate lists:
+1. Findings: gaps against the profile's completeness checklist, plus generic ones (no tests, no CI, no lockfile, missing .env.example).
+2. Proposals: each linked to a finding, listing exact files to add or change, source (generated, registry library, or reference repo), licence, risk tier (A config and scaffolding, B dependency changes, C new code touching existing logic), and expected effect.
+
+Matching rules:
+- Only propose registry entries whose profile matches, tier is core or alternative, "requires" is satisfied by the project, nothing in "conflicts_with" is present, and licence policy is Allow.
+- Never propose Warn, Block, Not stated, or review/exclude entries.
+- Prefer a library from the registry over generated code, and generated code over copied code. Do not copy code from reference repos in this version.
+- Use Gemini only to reason about gaps the checklist can't express, with a JSON schema, and mark those proposals "AI-suggested".
+
+UI: grouped by risk tier, tier A pre-ticked, a diff preview for each, and an explanation of why. Do not apply anything yet.
+```
+
+### Prompt 4: apply, verify, seal
+```
+Implement Approve, Apply, Verify and Download.
+
+Apply:
+- Work on a copy. Apply approved proposals one at a time.
+- After each one, run checks; if one fails, roll back that proposal only and report why.
+- Format only files we generate. Never reformat existing files.
+- Merge package.json changes as minimal edits, preserving the existing key order and indentation.
+
+Verify, in plain code:
+- Structural: output zip opens; every untouched file's SHA-256 matches the manifest.
+- Static: JSON files parse, JS/TS files parse without syntax errors, imports point to files or declared dependencies, no duplicate or conflicting dependency entries.
+- Rerun the secret scan on the output.
+- Show a badge listing exactly which levels passed, plus the line "Builds and tests were not run."
+
+Output zip: original files plus changes, a CHANGELOG.md and a NOTICE.md listing every added library with its licence, and preserved execute permissions. Provide a downloadable diff and a before/after report.
+```
+
+### Prompt 5 (later): registry verifier
+```
+Add a "Verify registry" tool. For each registry entry, call the npm registry API (and GitHub API where a repo is given) and fill: verified license (SPDX), latest version, last publish date (absolute), archived flag. Check that the npm package's repository field matches repo_url (flag mismatches as possible typosquats). Set status to active, stale (no release in 18 months), archived or rejected, with a reason. Never trust the stated licence over the SPDX value. Handle rate limits and CORS errors gracefully and let the user paste a GitHub token.
+```
+
+---
+
+## 13. Suggested build order after the first version works
+
+1. Re-run research for the truncated and missing registry categories (Section 11), then research the web-page and API registries.
+2. Write the registry verifier (Prompt 5) and run it; resolve every conflict in Section 11.
+3. Add a backend sandbox for behavioural and slice verification.
+4. Add the other profiles and a monthly re-verification of registry entries.
+
+## 14. Known unknowns
+
+- Whether AI Studio's current build mode supports the libraries and API calls assumed here: test early.
+- Whether an API key in a deployed client-side app is acceptable for you; check how AI Studio handles keys on export or deploy.
+- Every version, date and benchmark from the original research is unverified and was intentionally omitted.
